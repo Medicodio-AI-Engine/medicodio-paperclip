@@ -13,9 +13,9 @@ function requireEnv(env: NodeJS.ProcessEnv, key: string): string {
 
 export function readConfigFromEnv(env: NodeJS.ProcessEnv = process.env): OutlookMcpConfig {
   return {
-    tenantId: requireEnv(env, "SHAREPOINT_TENANT_ID"),
-    clientId: requireEnv(env, "SHAREPOINT_CLIENT_ID"),
-    clientSecret: requireEnv(env, "SHAREPOINT_CLIENT_SECRET"),
+    tenantId: requireEnv(env, "OUTLOOK_TENANT_ID"),
+    clientId: requireEnv(env, "OUTLOOK_CLIENT_ID"),
+    clientSecret: requireEnv(env, "OUTLOOK_CLIENT_SECRET"),
     mailbox: requireEnv(env, "OUTLOOK_MAILBOX"),
   };
 }

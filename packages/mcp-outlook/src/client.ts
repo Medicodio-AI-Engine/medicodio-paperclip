@@ -117,8 +117,10 @@ export class OutlookClient {
       try { errBody = await res.json(); } catch { errBody = await res.text(); }
       throw new OutlookApiError(res.status, method, url, errBody);
     }
-    if (res.status === 204) return undefined as T;
-    return res.json() as Promise<T>;
+    if (res.status === 204 || res.status === 202) return undefined as T;
+    const text = await res.text();
+    if (!text) return undefined as T;
+    return JSON.parse(text) as T;
   }
 
   private get mb(): string {
@@ -210,13 +212,18 @@ export class OutlookClient {
     });
   }
 
-  async replyToEmail(messageId: string, replyBody: string, replyAll = false): Promise<void> {
+  async replyToEmail(messageId: string, replyBody: string, replyAll = false, isHtml = false): Promise<void> {
     const endpoint = replyAll
       ? `${this.mb}/messages/${messageId}/replyAll`
       : `${this.mb}/messages/${messageId}/reply`;
-    await this.request("POST", endpoint, {
-      message: { body: { contentType: "Text", content: replyBody } },
-    });
+    if (isHtml) {
+      await this.request("POST", endpoint, {
+        message: { body: { contentType: "HTML", content: replyBody } },
+        comment: "",
+      });
+    } else {
+      await this.request("POST", endpoint, { comment: replyBody });
+    }
   }
 
   async forwardEmail(messageId: string, toAddresses: string[], comment?: string): Promise<void> {
@@ -248,4 +255,33 @@ export class OutlookClient {
   async sendDraft(messageId: string): Promise<void> {
     await this.request("POST", `${this.mb}/messages/${messageId}/send`);
   }
+
+  // ── Attachments ───────────────────────────────────────────────────────────────
+
+  async listAttachments(messageId: string): Promise<AttachmentMeta[]> {
+    const data = await this.request<{ value: AttachmentMeta[] }>(
+      "GET",
+      `${this.mb}/messages/${messageId}/attachments?$select=id,name,contentType,size,isInline`,
+    );
+    return data.value;
+  }
+
+  async getAttachmentContent(messageId: string, attachmentId: string): Promise<FileAttachment> {
+    return this.request<FileAttachment>(
+      "GET",
+      `${this.mb}/messages/${messageId}/attachments/${attachmentId}`,
+    );
+  }
+}
+
+export interface AttachmentMeta {
+  id: string;
+  name: string;
+  contentType: string;
+  size: number;
+  isInline: boolean;
+}
+
+export interface FileAttachment extends AttachmentMeta {
+  contentBytes: string; // base64
 }

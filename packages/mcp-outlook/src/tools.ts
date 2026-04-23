@@ -1,12 +1,15 @@
 import { z } from "zod";
+import mammoth from "mammoth";
+import { PDFParse } from "pdf-parse";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { OutlookClient } from "./client.js";
-import { formatErrorResponse, formatTextResponse } from "./format.js";
+import { formatErrorResponse, formatTextResponse, formatMixedResponse } from "./format.js";
 
 export interface ToolDefinition {
   name: string;
   description: string;
   schema: z.AnyZodObject;
-  execute: (input: Record<string, unknown>) => Promise<{ content: Array<{ type: "text"; text: string }> }>;
+  execute: (input: Record<string, unknown>) => Promise<CallToolResult>;
 }
 
 function makeTool<TSchema extends z.ZodRawShape>(
@@ -150,14 +153,15 @@ export function createToolDefinitions(client: OutlookClient): ToolDefinition[] {
     // ── Reply ─────────────────────────────────────────────────────────────────
     makeTool(
       "outlook_reply",
-      "Reply to an email. Set replyAll=true to reply to all recipients.",
+      "Reply to an email. Set replyAll=true to reply to all recipients. Set isHtml=true to send HTML-formatted body.",
       z.object({
         messageId: msgId,
-        body: z.string().describe("Reply body text"),
+        body: z.string().describe("Reply body — plain text or HTML depending on isHtml flag"),
         replyAll: z.boolean().default(false),
+        isHtml: z.boolean().default(false).describe("Set true to send HTML body (for formatted emails with lists, bold, etc.)"),
       }),
-      async ({ messageId, body, replyAll }) => {
-        await client.replyToEmail(messageId, body, replyAll);
+      async ({ messageId, body, replyAll, isHtml }) => {
+        await client.replyToEmail(messageId, body, replyAll, isHtml);
         return { replied: true };
       },
       client,
@@ -200,5 +204,78 @@ export function createToolDefinitions(client: OutlookClient): ToolDefinition[] {
       async ({ messageId }) => { await client.deleteEmail(messageId); return { deleted: true }; },
       client,
     ),
+
+    // ── List attachments ──────────────────────────────────────────────────────
+    makeTool(
+      "outlook_list_attachments",
+      "List all attachments on an email. Returns name, contentType, size, and attachment ID for each file.",
+      z.object({ messageId: msgId }),
+      async ({ messageId }) => client.listAttachments(messageId),
+      client,
+    ),
+
+    // ── Read attachment ───────────────────────────────────────────────────────
+    {
+      name: "outlook_read_attachment",
+      description:
+        "Download and read an email attachment. Extracts text from .docx and PDF. Returns plain text for .txt/.csv/.md. Returns image content blocks for images (JPG/PNG/GIF/WEBP) so vision can inspect them directly.",
+      schema: z.object({
+        messageId: msgId,
+        attachmentId: z.string().describe("Attachment ID from outlook_list_attachments"),
+      }),
+      execute: async (rawInput) => {
+        try {
+          const { messageId, attachmentId } = z.object({ messageId: z.string(), attachmentId: z.string() }).parse(rawInput);
+          const att = await client.getAttachmentContent(messageId, attachmentId);
+          const name = att.name.toLowerCase();
+          const bytes = Buffer.from(att.contentBytes, "base64");
+          const ct = att.contentType.toLowerCase();
+
+          // .docx
+          if (name.endsWith(".docx") || ct.includes("wordprocessingml") || ct.includes("msword")) {
+            const result = await mammoth.extractRawText({ buffer: bytes });
+            return formatTextResponse({ name: att.name, contentType: att.contentType, extractedText: result.value });
+          }
+
+          // PDF
+          if (name.endsWith(".pdf") || ct.includes("pdf")) {
+            const parser = new PDFParse({ data: bytes });
+            const result = await parser.getText();
+            return formatTextResponse({ name: att.name, contentType: att.contentType, extractedText: result.text, pages: result.total });
+          }
+
+          // Plain text variants
+          if (ct.startsWith("text/") || name.endsWith(".txt") || name.endsWith(".md") || name.endsWith(".csv")) {
+            return formatTextResponse({ name: att.name, contentType: att.contentType, text: bytes.toString("utf-8") });
+          }
+
+          // Images — return as image content block so Claude vision can read
+          const imageTypes: Record<string, string> = {
+            "image/jpeg": "image/jpeg",
+            "image/jpg": "image/jpeg",
+            "image/png": "image/png",
+            "image/gif": "image/gif",
+            "image/webp": "image/webp",
+          };
+          const mimeType = imageTypes[ct] ?? (name.match(/\.(jpe?g)$/i) ? "image/jpeg" : name.match(/\.png$/i) ? "image/png" : null);
+          if (mimeType) {
+            return formatMixedResponse([
+              { type: "text", text: `Attachment: ${att.name} (${att.size} bytes) — image content below:` },
+              { type: "image", data: att.contentBytes, mimeType },
+            ]);
+          }
+
+          // Unknown binary — return metadata only
+          return formatTextResponse({
+            name: att.name,
+            contentType: att.contentType,
+            size: att.size,
+            note: "Unsupported file type. Cannot extract content. Verify manually.",
+          });
+        } catch (error) {
+          return formatErrorResponse(error);
+        }
+      },
+    },
   ];
 }
