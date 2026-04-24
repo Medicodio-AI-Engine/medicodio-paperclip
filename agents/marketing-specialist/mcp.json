@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "sharepoint": {
-      "command": "/usr/local/bin/node",
-      "args": ["/Users/karthikkhatavkar/medicodio-paperclip/packages/mcp-sharepoint/dist/stdio.js"],
+      "command": "node",
+      "args": ["./packages/mcp-sharepoint/dist/stdio.js"],
       "env": {
         "SHAREPOINT_TENANT_ID": "${SHAREPOINT_TENANT_ID}",
         "SHAREPOINT_CLIENT_ID": "${SHAREPOINT_CLIENT_ID}",
@@ -11,8 +11,12 @@
       }
     },
     "outlook": {
-      "command": "/usr/local/bin/node",
-      "args": ["/Users/karthikkhatavkar/medicodio-paperclip/packages/mcp-outlook/dist/stdio.js"],
+      "command": "node",
+      "args": ["./packages/mcp-outlook/dist/stdio.js"]
+    },
+    "brave-search": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
       "env": {
         "OUTLOOK_TENANT_ID": "${SHAREPOINT_TENANT_ID}",
         "OUTLOOK_CLIENT_ID": "${OUTLOOK_CLIENT_ID}",
@@ -21,19 +25,20 @@
       }
     },
     "duckduckgo": {
-      "command": "/Users/karthikkhatavkar/.bun/bin/bun",
-      "args": ["/Users/karthikkhatavkar/.npm-global/bin/duckduckgo-mcp"]
+      "command": "npx",
+      "args": ["-y", "duckduckgo-mcp-server"]
     },
     "fetch": {
-      "command": "/Users/karthikkhatavkar/.npm-global/bin/mcp-fetch"
+      "command": "uvx",
+      "args": ["mcp-server-fetch"]
     },
     "playwright": {
-      "command": "/Users/karthikkhatavkar/.npm-global/bin/playwright-mcp",
-      "args": ["--browser", "chromium", "--headless"]
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest", "--browser", "chromium", "--headless"]
     },
     "hunter": {
-      "command": "/usr/local/bin/node",
-      "args": ["/Users/karthikkhatavkar/medicodio-paperclip/packages/mcp-hunter/dist/stdio.js"],
+      "command": "node",
+      "args": ["./packages/mcp-hunter/dist/stdio.js"],
       "env": {
         "HUNTER_API_KEY": "${HUNTER_API_KEY}"
       }
