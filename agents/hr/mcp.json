@@ -11,12 +11,8 @@
       }
     },
     "outlook": {
-      "command": "node",
-      "args": ["./packages/mcp-outlook/dist/stdio.js"]
-    },
-    "brave-search": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "command": "/usr/local/bin/node",
+      "args": ["/Users/karthikkhatavkar/medicodio-paperclip/packages/mcp-outlook/dist/stdio.js"],
       "env": {
         "OUTLOOK_TENANT_ID": "${SHAREPOINT_TENANT_ID}",
         "OUTLOOK_CLIENT_ID": "${OUTLOOK_CLIENT_ID}",

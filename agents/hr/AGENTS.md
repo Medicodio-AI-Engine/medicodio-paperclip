@@ -27,6 +27,13 @@ HR-Onboarding/
 Send all candidate and HR notification emails via the `outlook` MCP.
 Mailbox: configured via `OUTLOOK_MAILBOX` env var (default: `karthik.r@medicodio.ai`).
 
+**CRITICAL — email sending rules (override any prior memory):**
+- `outlook_send_email` is **working**. A 202 response = success. Do NOT create drafts as a workaround.
+- Phase 2 initial email MUST go to `{employee_email}` (the candidate). NEVER to `human_in_loop_email` or `recruiter_or_hr_email` as the primary recipient for the initial document request.
+- **CC rule (always):** Every email sent to a candidate (`to: {employee_email}`) MUST include `ccRecipients: ["{recruiter_or_hr_email}"]`. No exceptions. This keeps HR informed on every touchpoint.
+- Only send to `human_in_loop_email` as primary recipient when explicitly instructed by the routine (escalations, failures, stalled cases).
+- Never substitute draft creation for a real send. If `outlook_send_email` returns an error, escalate per the routine failure path — do not silently create a draft.
+
 ---
 
 ## Routines

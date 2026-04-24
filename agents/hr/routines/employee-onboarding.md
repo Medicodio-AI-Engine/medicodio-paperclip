@@ -9,16 +9,25 @@
 ## Global Conventions
 
 - **Timestamps:** All timestamps MUST be ISO-8601 UTC format: `YYYY-MM-DDTHH:MM:SSZ` (e.g. `2026-04-23T09:15:00Z`). Never use local time or ambiguous formats.
-- **Audit-log:** Every event MUST append a full 11-column CSV row to `HR-Onboarding/audit-log.csv`. See Audit Log Format section.
+- **Audit-log:** Every event MUST append a full 12-column CSV row to `HR-Onboarding/audit-log.csv`. See Audit Log Format section.
 - **CSV append pattern:** `sharepoint_read_file path="HR-Onboarding/audit-log.csv"` → append new pipe-delimited line → `sharepoint_write_file path="HR-Onboarding/audit-log.csv"` with full updated content. Delimiter is `|`. Never use comma as delimiter.
 - **Government ID masking:** Never output, log, or include in any email the digits of Aadhaar, PAN, or any government ID. Use placeholders only: "Aadhaar received ✓", "PAN card on file". Use `[REDACTED]` if you must reference a specific ID in an exception note.
 - **HTML emails:** All emails sent by this routine MUST use `isHtml: true`. Never send plain text.
 
 ---
 
-## Inputs (from routine payload or issue body)
+## Inputs — Where to Read Them
 
-### Required
+**CRITICAL — read order (do NOT skip steps):**
+
+1. Check `PAPERCLIP_WAKE_PAYLOAD_JSON` env var first. If present, parse it and extract the `payload` field — all employee data lives there when fired by heartbeat or API.
+2. If `PAPERCLIP_WAKE_PAYLOAD_JSON` is absent or has no `payload`, call `GET /api/issues/{PAPERCLIP_TASK_ID}/heartbeat-context` and extract employee fields from the run payload embedded in the context.
+3. If still no employee data found, scan the issue body for `employee_full_name:`, `employee_email:` etc. key-value lines.
+4. If none of the above yield the required fields → post blocked comment listing missing fields, notify `karthik.r@medicodio.ai`, STOP.
+
+**Never assume the issue description contains employee data.** Paperclip creates execution issues with the routine's static description — employee data comes from the run payload.
+
+### Required fields
 | Field | Description |
 |---|---|
 | `employee_full_name` | Full name |
@@ -163,7 +172,7 @@ Step 8. sharepoint_create_folder parentPath="HR-Onboarding/{employee_full_name} 
 Step 9. sharepoint_create_folder parentPath="HR-Onboarding/{employee_full_name} - {date_of_joining}" folderName="03_Exception_Notes"
 
 Step 10. Append to audit-log (CSV append pattern):
-    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|initiated|case_created|Onboarding case initialised — folders created in SharePoint|—
+    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|initiated|case_created|Onboarding case initialised — folders created in SharePoint|—|{PAPERCLIP_TASK_ID}
 
 Step 11. Create per-employee case tracker:
     sharepoint_write_file
@@ -181,6 +190,7 @@ Step 11. Create per-employee case tracker:
     | Type | {employee_type} |
     | Joining Date | {date_of_joining} |
     | HR Contact | {recruiter_or_hr_name} |
+    | HR Contact Email | {recruiter_or_hr_email} |
     | Case ID | {case_id} |
 
     ## Status History
@@ -301,6 +311,7 @@ Body:
 ```
 Step 12. outlook_send_email
     → to: {employee_email}
+    → ccRecipients: ["{recruiter_or_hr_email}"]
     → subject + body from template above
     → isHtml: true
     → on failure: outlook_send_email to human_in_loop_email immediately, append to audit-log.csv with current_status=escalated, STOP

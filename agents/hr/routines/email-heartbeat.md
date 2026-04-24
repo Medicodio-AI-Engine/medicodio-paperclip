@@ -19,13 +19,13 @@ File: `HR-Onboarding/audit-log.csv` — pipe-delimited CSV (`|`). Never use comm
 
 **Append pattern:** `sharepoint_read_file path="HR-Onboarding/audit-log.csv"` → add new line at end → `sharepoint_write_file path="HR-Onboarding/audit-log.csv"` with full updated content.
 
-Every row appended by the heartbeat MUST include all 11 columns:
+Every row appended by the heartbeat MUST include all 12 columns:
 
 ```
-{timestamp}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|{event}|{action_taken}|{brief_reason}
+{timestamp}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|{event}|{action_taken}|{brief_reason}|{paperclip_issue_id}
 ```
 
-Use `—` (em-dash) for fields that do not apply (e.g. `case_id` on the heartbeat tick summary row). Never leave a field blank.
+Use `—` (em-dash) for fields that do not apply (e.g. `case_id` on the heartbeat tick summary row, `paperclip_issue_id` on heartbeat-only rows). Never leave a field blank.
 
 ---
 
@@ -47,8 +47,10 @@ Delegate to the onboarding routine reply-processing phases when a reply arrives.
      - `employee_full_name`      (from any row for this `case_id`)
      - `employee_type`           (from `case_created` row)
      - `case_id`                 (= `{employee_email}-{date_of_joining}`, from `case_created` row)
+     - `date_of_joining`         (parse from `case_id` — everything after the last `-YYYY` prefix; format: `YYYY-MM-DD`)
      - `human_in_loop_email`     (from `case_created` row)
      - `recruiter_or_hr_name`    (from `case_created` row)
+     - `recruiter_or_hr_email`   (read from `HR-Onboarding/{employee_full_name} - {date_of_joining}/case-tracker.md` field `HR Contact Email`, or `null` if not present)
      - `current_status`          (from the most recent row for this `case_id`)
      - `last_outbound_email_timestamp`  (timestamp of most recent `initial_email_sent` OR `reminder_1_sent` OR `reminder_2_sent` row)
      - `reminder_1_sent`         (`true` if a row with event=`reminder_1_sent` exists for this `case_id`, else `false`)
@@ -56,6 +58,7 @@ Delegate to the onboarding routine reply-processing phases when a reply arrives.
      - `reminder_1_sent_timestamp`      (timestamp of `reminder_1_sent` row, if present)
      - `reminder_2_sent_timestamp`      (timestamp of `reminder_2_sent` row, if present)
      - `alternate_candidate_email`      (read from `HR-Onboarding/{employee_full_name} - {date_of_joining}/case-tracker.md` field `alternate_candidate_email`, or `null` if not present)
+     - `paperclip_issue_id`      (column 12 of the `case_created` row for this `case_id`; `null` if missing — legacy rows pre-date this field)
 
    **TIMESTAMP GUARD:** For each case, if `last_outbound_email_timestamp` is missing, null, or unparseable:
    → Append to audit-log:
@@ -112,15 +115,18 @@ For each active case:
        ```
        POST /api/routines/ddedecdb-871a-4ad1-980b-5935a2ecda75/run
        {
-         "source": "heartbeat_reply_detected",
+         "source": "api",
+         "parentIssueId": "{paperclip_issue_id}",     // links execution issue as child of original onboarding issue; omit if null
          "payload": {
            "case_id": "{case_id}",
            "messageId": "{messageId}",
            "employee_email": "{employee_email}",
            "employee_full_name": "{employee_full_name}",
            "employee_type": "{employee_type}",
-           "human_in_loop_email": "{human_in_loop_email}",
+           "date_of_joining": "{date_of_joining}",
            "recruiter_or_hr_name": "{recruiter_or_hr_name}",
+           "recruiter_or_hr_email": "{recruiter_or_hr_email}",
+           "human_in_loop_email": "{human_in_loop_email}",
            "alternate_candidate_email": "{alternate_candidate_email or null}",
            "current_status": "{current_status}",
            "reply_index": {N},
@@ -185,6 +191,7 @@ For each active case:
 
 11. `outlook_send_email`
     - to: `{employee_email}`
+    - ccRecipients: `["{recruiter_or_hr_email}"]`
     - subject: `Reminder: Pending Onboarding Documents – {employee_full_name}`
     - isHtml: true
     - body:
@@ -221,6 +228,7 @@ For each active case:
 
 15. `outlook_send_email`
     - to: `{employee_email}`
+    - ccRecipients: `["{recruiter_or_hr_email}"]`
     - subject: `Urgent Reminder: Onboarding Documents Pending – {employee_full_name}`
     - isHtml: true
     - body:
