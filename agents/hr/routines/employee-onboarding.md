@@ -221,6 +221,12 @@ Step 11. Create per-employee case tracker:
     |-------|---------|---------|
     | Nudge 1 | — | — |
     | Nudge 2 | — | — |
+
+    ## Attachment Lookup
+    (One row appended per accepted attachment each round. Phase 9 uses the most recent row per filename to re-fetch bytes for docs accepted in earlier runs.)
+
+    | Filename | Message ID | Attachment ID | Content Type | Round |
+    |----------|-----------|---------------|-------------|-------|
     ---
 ```
 
@@ -483,11 +489,15 @@ Step 29. Run identity verification (using document-validator skill Step 3b):
     Record result in identity_checks object as per document-validator skill Step 4.
 
 Step 30. Update per-employee case-tracker Document Tracker:
-    sharepoint_write_file (overwrite document tracker section)
+    sharepoint_write_file (overwrite full file)
     path="HR-Onboarding/{employee_full_name} - {date_of_joining}/case-tracker.md"
     → Update each document row: received / verified / rejected / pending
     → Update Identity Verification section with results from Step 29
     → Add row to Status History: | {now} | under_automated_review | Validated {N} documents. Present: {X}. Issues: {Y}. identity_check_outcome: {outcome} |
+    → For each attachment in the document-validator result, append a row to the Attachment Lookup table:
+      | {attachment.name} | {attachment.messageId} | {attachment.attachmentId} | {attachment.contentType} | {reply_index} |
+      (reply_index comes from the run payload — use 1 for the first reply, 2 for the second, etc.)
+      Never remove or overwrite existing rows — only append. If the same filename appears again (resubmission), add a new row; Phase 9 will use the most recent row for that filename.
 ```
 
 ---
@@ -605,17 +615,33 @@ Step 45. Append to audit-log.csv (CSV append pattern):
     {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|sharepoint_upload_in_progress|human_approved|Human approved — SharePoint upload started|—
 
 Step 46. For each verified document:
-    sharepoint_write_file
-    path="HR-Onboarding/{employee_full_name} - {date_of_joining}/02_Verified_Documents/{filename}"
+    Resolve contentBytes and contentType using this order:
+    a. If the document was processed in Phase 5 of THIS run (contentBytes is in current context) → use it directly.
+    b. If the document was accepted in a PREVIOUS run (not in current context):
+       → sharepoint_read_file path="HR-Onboarding/{employee_full_name} - {date_of_joining}/case-tracker.md"
+       → Parse the Attachment Lookup table — find the MOST RECENT row where Filename = {filename}
+       → Call: outlook_read_attachment messageId="{row.messageId}" attachmentId="{row.attachmentId}"
+       → Extract contentBytes and contentType from that response
 
-    SharePoint error handling (applies to all sharepoint_write_file and sharepoint_read_file calls):
+    Then upload:
+    sharepoint_upload_binary
+    filePath="HR-Onboarding/{employee_full_name} - {date_of_joining}/02_Verified_Documents/{filename}"
+    contentBase64="{contentBytes}"
+    mimeType="{contentType}"
+
+    SharePoint error handling (applies to all sharepoint_upload_binary and sharepoint_read_file calls):
     - On HTTP 429 (rate limited) or 503 (service unavailable): wait 10 seconds and retry, up to 3 attempts
     - On 3rd failure: set status = escalated, append escalation row to audit-log, notify human_in_loop_email with:
       the operation that failed, the exact file path, the error code and message. Do NOT silently drop data.
 
 Step 47. For each raw submission file:
-    sharepoint_write_file
-    path="HR-Onboarding/{employee_full_name} - {date_of_joining}/01_Raw_Submissions/{filename}"
+    Resolve contentBytes and contentType using the same two-step logic as Step 46 (current context first, then Attachment Lookup table re-fetch if needed).
+
+    Then upload:
+    sharepoint_upload_binary
+    filePath="HR-Onboarding/{employee_full_name} - {date_of_joining}/01_Raw_Submissions/{filename}"
+    contentBase64="{contentBytes}"
+    mimeType="{contentType}"
     (same retry logic as Step 46)
 
 Step 48. If any discrepancy notes exist:
