@@ -20,20 +20,13 @@
         "OUTLOOK_MAILBOX": "${OUTLOOK_MAILBOX}"
       }
     },
-    "brave-search": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
-      "env": {
-        "BRAVE_API_KEY": "${BRAVE_API_KEY}"
-      }
-    },
     "duckduckgo": {
       "command": "npx",
       "args": ["-y", "duckduckgo-mcp-server"]
     },
     "fetch": {
-      "command": "uvx",
-      "args": ["mcp-server-fetch"]
+      "command": "npx",
+      "args": ["-y", "@tokenizin/mcp-fetch"]
     },
     "apify": {
       "command": "npx",

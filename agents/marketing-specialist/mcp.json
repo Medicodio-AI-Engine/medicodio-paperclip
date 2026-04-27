@@ -12,11 +12,7 @@
     },
     "outlook": {
       "command": "node",
-      "args": ["./packages/mcp-outlook/dist/stdio.js"]
-    },
-    "brave-search": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "args": ["./packages/mcp-outlook/dist/stdio.js"],
       "env": {
         "OUTLOOK_TENANT_ID": "${SHAREPOINT_TENANT_ID}",
         "OUTLOOK_CLIENT_ID": "${OUTLOOK_CLIENT_ID}",
@@ -29,8 +25,8 @@
       "args": ["-y", "duckduckgo-mcp-server"]
     },
     "fetch": {
-      "command": "uvx",
-      "args": ["mcp-server-fetch"]
+      "command": "npx",
+      "args": ["-y", "@tokenizin/mcp-fetch"]
     },
     "playwright": {
       "command": "npx",
