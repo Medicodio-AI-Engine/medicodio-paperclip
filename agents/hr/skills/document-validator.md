@@ -34,6 +34,8 @@ For each attachment, call `outlook_read_attachment`:
 | `.zip / .rar` | ❌ No | Flag as received, instruct candidate to send files unzipped |
 | Other binary | ❌ No | Metadata only — flag as received, note manual verification needed |
 
+**Every response includes `contentBytes` (base64) and `contentType`.** The calling agent MUST retain both fields per attachment — they are required in Phase 9 to upload the original file to SharePoint via `sharepoint_upload_binary`. Do not discard them after validation.
+
 **Note on image quality:** Claude vision can read scanned documents, ID cards, certificates, and photos. If an image is blurry, too dark, or resolution is very low, flag it as `unclear` and request a re-upload with specific feedback (e.g., "The image of your degree certificate is blurry — please provide a clearer scan").
 
 Combine: email body text + all extracted attachment text → **full submission text** for matching.
@@ -91,7 +93,7 @@ Return this object (the calling agent decides what to do with it):
 {
   "sender": { "name": "...", "email": "..." },
   "attachments": [
-    { "name": "file.pdf", "contentType": "application/pdf", "readable": true, "extractedLength": 1200 }
+    { "name": "file.pdf", "contentType": "application/pdf", "readable": true, "extractedLength": 1200, "messageId": "AAMkAGI...", "attachmentId": "AAMkAGI...att" }
   ],
   "checklist": [
     { "item": "Aadhaar Card", "status": "present", "evidence": "Aadhaar card received — number [REDACTED]" },

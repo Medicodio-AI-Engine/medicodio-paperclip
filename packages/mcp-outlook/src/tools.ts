@@ -234,7 +234,7 @@ export function createToolDefinitions(client: OutlookClient): ToolDefinition[] {
           // .docx
           if (name.endsWith(".docx") || ct.includes("wordprocessingml") || ct.includes("msword")) {
             const result = await mammoth.extractRawText({ buffer: bytes });
-            return formatTextResponse({ name: att.name, contentType: att.contentType, extractedText: result.value });
+            return formatTextResponse({ name: att.name, contentType: att.contentType, extractedText: result.value, contentBytes: att.contentBytes });
           }
 
           // PDF
@@ -250,14 +250,15 @@ export function createToolDefinitions(client: OutlookClient): ToolDefinition[] {
                 extractedText: "",
                 pages: result.total,
                 warning: "SCANNED_PDF_NO_TEXT: This PDF has no extractable text layer. It is likely a scanned image. The agent must flag this document for manual human review — do not attempt to validate its contents automatically.",
+                contentBytes: att.contentBytes,
               });
             }
-            return formatTextResponse({ name: att.name, contentType: att.contentType, extractedText: text, pages: result.total });
+            return formatTextResponse({ name: att.name, contentType: att.contentType, extractedText: text, pages: result.total, contentBytes: att.contentBytes });
           }
 
           // Plain text variants
           if (ct.startsWith("text/") || name.endsWith(".txt") || name.endsWith(".md") || name.endsWith(".csv")) {
-            return formatTextResponse({ name: att.name, contentType: att.contentType, text: bytes.toString("utf-8") });
+            return formatTextResponse({ name: att.name, contentType: att.contentType, text: bytes.toString("utf-8"), contentBytes: att.contentBytes });
           }
 
           // Images — return as image content block so Claude vision can read
@@ -271,7 +272,7 @@ export function createToolDefinitions(client: OutlookClient): ToolDefinition[] {
           const mimeType = imageTypes[ct] ?? (name.match(/\.(jpe?g)$/i) ? "image/jpeg" : name.match(/\.png$/i) ? "image/png" : null);
           if (mimeType) {
             return formatMixedResponse([
-              { type: "text", text: `Attachment: ${att.name} (${att.size} bytes) — image content below:` },
+              { type: "text", text: JSON.stringify({ name: att.name, contentType: att.contentType, size: att.size, contentBytes: att.contentBytes }) },
               { type: "image", data: att.contentBytes, mimeType },
             ]);
           }
@@ -281,6 +282,7 @@ export function createToolDefinitions(client: OutlookClient): ToolDefinition[] {
             name: att.name,
             contentType: att.contentType,
             size: att.size,
+            contentBytes: att.contentBytes,
             note: "Unsupported file type. Cannot extract content. Verify manually.",
           });
         } catch (error) {

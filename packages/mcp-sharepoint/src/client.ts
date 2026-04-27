@@ -243,6 +243,31 @@ export class SharepointClient {
     return res.json() as Promise<DriveItem>;
   }
 
+  // ── Binary upload ────────────────────────────────────────────────────────────
+
+  async uploadBinary(filePath: string, contentBase64: string, mimeType: string, driveId?: string): Promise<DriveItem> {
+    const siteId = await this.getSiteId();
+    const dId = driveId ?? (await this.getDefaultDriveId());
+    const encoded = encodeURIComponent(filePath).replace(/%2F/g, "/");
+    const token = await this.getAccessToken();
+    const url = `${GRAPH_BASE}/sites/${siteId}/drives/${dId}/root:/${encoded}:/content`;
+    const bytes = Buffer.from(contentBase64, "base64");
+    const res = await fetch(url, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": mimeType,
+      },
+      body: bytes,
+    });
+    if (!res.ok) {
+      let errBody: unknown;
+      try { errBody = await res.json(); } catch { errBody = await res.text(); }
+      throw new SharepointApiError(res.status, "PUT", url, errBody);
+    }
+    return res.json() as Promise<DriveItem>;
+  }
+
   // ── Folder create ────────────────────────────────────────────────────────────
 
   async createFolder(parentPath: string, folderName: string, driveId?: string): Promise<DriveItem> {

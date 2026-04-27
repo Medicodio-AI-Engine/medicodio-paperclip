@@ -106,6 +106,21 @@ export function createToolDefinitions(client: SharepointClient): ToolDefinition[
       client,
     ),
 
+    // ── Upload binary ─────────────────────────────────────────────────────────
+    makeTool(
+      "sharepoint_upload_binary",
+      "Upload a binary file (PDF, image, DOCX, etc.) to SharePoint using base64-encoded content. Use the contentBytes field returned by outlook_read_attachment. Overwrites if the file already exists.",
+      z.object({
+        filePath: z.string().describe(filePathDesc),
+        contentBase64: z.string().describe("Base64-encoded file content (contentBytes from outlook_read_attachment)"),
+        mimeType: z.string().describe("MIME type of the file, e.g. 'application/pdf', 'image/jpeg', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'"),
+        driveId: driveIdOpt,
+      }),
+      async ({ filePath, contentBase64, mimeType, driveId }) =>
+        client.uploadBinary(filePath, contentBase64, mimeType, driveId),
+      client,
+    ),
+
     // ── Create folder ─────────────────────────────────────────────────────────
     makeTool(
       "sharepoint_create_folder",
