@@ -13,6 +13,7 @@
 - **CSV append pattern:** `sharepoint_read_file path="HR-Onboarding/audit-log.csv"` → append new pipe-delimited line → `sharepoint_write_file path="HR-Onboarding/audit-log.csv"` with full updated content. Delimiter is `|`. Never use comma as delimiter.
 - **Government ID masking:** Never output, log, or include in any email the digits of Aadhaar, PAN, or any government ID. Use placeholders only: "Aadhaar received ✓", "PAN card on file". Use `[REDACTED]` if you must reference a specific ID in an exception note.
 - **HTML emails:** All emails sent by this routine MUST use `isHtml: true`. Never send plain text.
+- **Binary file uploads (CRITICAL):** When uploading PDFs, images, or any non-text file from Outlook to SharePoint, ALWAYS use `sharepoint_transfer_from_outlook` — one call with messageId + attachmentId + destPath. It streams bytes server-side; binary never enters the context window. NEVER use `outlook_read_attachment` + `sharepoint_upload_binary` for files — base64 gets truncated for anything over ~75 KB.
 
 ---
 
@@ -625,33 +626,25 @@ Step 46. For each verified document, follow this exact sequence:
     - If accepted in a PREVIOUS run → read case-tracker.md Attachment Lookup table,
       find the MOST RECENT row where Filename = {filename}, extract messageId + attachmentId.
 
-    STEP 46b — Download the original attachment binary (up to 3 attempts):
-    outlook_read_attachment messageId="{messageId}" attachmentId="{attachmentId}"
-    → Extract: contentBytes (base64 string), contentType (MIME type), size (bytes)
-    → On failure: wait 10 s, retry. After 3 failures → escalate (see Step 49), skip this file.
+    STEP 46b — Transfer directly from Outlook to SharePoint (up to 3 attempts):
+    sharepoint_transfer_from_outlook
+    messageId="{messageId}"
+    attachmentId="{attachmentId}"
+    destPath="HR-Onboarding/{employee_full_name} - {date_of_joining}/02_Verified_Documents/{filename}"
+    mimeType="{expected MIME type — e.g. application/pdf, image/jpeg, image/png}"
+    → Returns: { name, size, transferredBytes, webUrl }
+    → On HTTP 429 or 503: wait 10 s, retry. After 3 failures → escalate (see Step 49), skip this file.
+    → Do NOT use outlook_read_attachment + sharepoint_upload_binary — binary would pass through context window and fail for large files.
 
-    STEP 46c — Validate before writing (MANDATORY — never skip):
-    - contentBytes MUST be non-null and non-empty string.
-    - Decoded byte length MUST be > 0 (size > 0).
-    - contentType MUST match expected format for the document type
-      (e.g. PDF → application/pdf, image → image/jpeg or image/png, DOCX → application/vnd.openxmlformats...).
-    - If ANY check fails → do NOT write to SharePoint. Log the failure, escalate via Step 49.
-
-    STEP 46d — Upload original binary to SharePoint (up to 3 attempts):
-    sharepoint_write_file
-    filePath="HR-Onboarding/{employee_full_name} - {date_of_joining}/02_Verified_Documents/{filename}"
-    content="{base64-decoded raw bytes}"
-    → On HTTP 429 or 503: wait 10 s, retry. After 3 failures → escalate (see Step 49).
-
-    STEP 46e — Post-upload integrity check:
+    STEP 46c — Post-upload integrity check:
     sharepoint_get_file_info
     filePath="HR-Onboarding/{employee_full_name} - {date_of_joining}/02_Verified_Documents/{filename}"
     → Confirm returned size > 0.
     → If size = 0 or file not found → delete the empty file, escalate via Step 49.
 
-Step 47. For each raw submission file, apply the identical 46a–46e sequence:
-    Target path: "HR-Onboarding/{employee_full_name} - {date_of_joining}/01_Raw_Submissions/{filename}"
-    (same download → validate → upload → integrity-check logic)
+Step 47. For each raw submission file, apply the identical 46a–46c sequence:
+    Target destPath: "HR-Onboarding/{employee_full_name} - {date_of_joining}/01_Raw_Submissions/{filename}"
+    Use sharepoint_transfer_from_outlook (same single-call pattern — NOT outlook_read_attachment + sharepoint_upload_binary)
 
 Step 48. If any discrepancy notes exist:
     sharepoint_write_file
@@ -689,7 +682,7 @@ Step 53. Update case-tracker:
 
 ---
 
-## PHASE 10 — Close case
+## PHASE 10 — Send completion email and close case
 
 ```
 Step 54. All of the following must be true before completing:
@@ -699,15 +692,81 @@ Step 54. All of the following must be true before completing:
     ✓ SharePoint upload successful
     ✓ Notification sent to human_in_loop_email
 
+Step 54a. Send onboarding completion email to the candidate.
+    Recipients:
+        - employee_email (primary)
+        - Any additional email addresses on file for this candidate (e.g. personal email if provided)
+    Subject: "Onboarding Completed – Next Steps"
+    Body:
+        Dear {employee_full_name},
+
+        We are pleased to confirm that your onboarding process has been successfully completed.
+
+        Your joining date is {date_of_joining}. Further details regarding your next steps — including reporting instructions,
+        system access, and any pre-joining formalities — will be shared with you shortly via email.
+
+        If you have any questions or require any changes, please reply to this email and our HR team will assist you promptly.
+
+        Welcome aboard!
+
+        Warm regards,
+        HR Team
+        Medicodio AI
+
+    Log:
+        - Email sent status (success / failure)
+        - Timestamp of send
+        - Recipient list (all addresses emailed)
+    On failure: notify human_in_loop_email immediately, append failure row to audit-log.csv, do NOT close case.
+
+Step 54b. Send IT setup notification email.
+    Recipients:
+        - IT_SUPPORT_EMAIL (from env — itadmin@medicodio.ai)
+        - human_in_loop_email (HR reviewer, CC)
+        - recruiter_or_hr_email (CC)
+    Subject: "New Joiner IT Setup Required – {employee_full_name} ({role}) – Joining {date_of_joining}"
+    Body:
+        Hi IT Team,
+
+        Please be informed that a new team member is joining Medicodio AI and requires full IT setup to be ready before their
+        joining date.
+
+        New Joiner Details:
+        - Name:          {employee_full_name}
+        - Role:          {role}
+        - Date of Joining: {date_of_joining}
+        - Employee Type: {employee_type}
+
+        Action Required — please ensure the following are ready by {date_of_joining}:
+        1. Laptop / workstation provisioned and configured
+        2. Company email account created ({employee_full_name}@medicodio.ai or as per naming convention)
+        3. Required software and tools installed for role: {role}
+        4. Access provisioned to relevant systems, repositories, and internal tools
+        5. VPN / remote access configured if applicable
+        6. Any role-specific hardware or peripherals arranged
+
+        Please keep everything ready before the joining date. If you need any additional information, reach out to
+        {recruiter_or_hr_name} at {recruiter_or_hr_email}.
+
+        Regards,
+        HR Team
+        Medicodio AI
+
+    Log:
+        - Email sent status (success / failure)
+        - Timestamp of send
+        - Recipients list
+    On failure: log warning, notify human_in_loop_email, continue case closure (non-blocking).
+
 Step 55. Set status = completed
 
 Step 56. Append to audit-log.csv (CSV append pattern):
-    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|completed|case_completed|Onboarding case closed — all docs verified and uploaded|—
+    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|completed|case_completed|Onboarding case closed — all docs verified and uploaded. Completion email sent to candidate. IT setup notification sent.|{recipient_list}
 
-Step 57. Post final issue comment: "Onboarding case completed for {employee_full_name}. SharePoint folder: HR-Onboarding/{employee_full_name} - {date_of_joining}"
+Step 57. Post final issue comment: "Onboarding case completed for {employee_full_name}. SharePoint folder: HR-Onboarding/{employee_full_name} - {date_of_joining}. Completion email sent to: {recipient_list}. IT setup notification sent to: {IT_SUPPORT_EMAIL}"
 
 Step 58. Final case-tracker update:
-    → Add row to Status History: | {now} | completed | Onboarding complete. All docs verified and uploaded. |
+    → Add row to Status History: | {now} | completed | Onboarding complete. All docs verified, uploaded. Completion email sent to candidate. IT setup notification sent to IT team and HR. |
     → Update header to show: **CASE STATUS: COMPLETED**
 
 Step 59. Update Paperclip issue → done

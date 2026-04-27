@@ -57,43 +57,58 @@ export class SharepointApiError extends Error {
 
 export class SharepointClient {
   private tokenCache: TokenCache | null = null;
+  private outlookTokenCache: TokenCache | null = null;
   private siteId: string | null = null;
 
   constructor(private readonly config: SharepointMcpConfig) {}
 
   // ── Auth ────────────────────────────────────────────────────────────────────
 
+  private async fetchToken(tenantId: string, clientId: string, clientSecret: string): Promise<string> {
+    const now = Date.now();
+    const url = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: clientId,
+        client_secret: clientSecret,
+        scope: "https://graph.microsoft.com/.default",
+      }).toString(),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Token fetch failed ${res.status}: ${text}`);
+    }
+    const data = (await res.json()) as { access_token: string; expires_in: number };
+    return Object.assign(data, { _expiresAt: now + data.expires_in * 1000 }).access_token;
+  }
+
   private async getAccessToken(): Promise<string> {
     const now = Date.now();
     if (this.tokenCache && this.tokenCache.expiresAt > now + 60_000) {
       return this.tokenCache.accessToken;
     }
+    const token = await this.fetchToken(this.config.tenantId, this.config.clientId, this.config.clientSecret);
+    // re-fetch gives us a new expires_in — store with a fixed 55-min window (tokens are 1h)
+    this.tokenCache = { accessToken: token, expiresAt: now + 55 * 60 * 1000 };
+    return token;
+  }
 
-    const url = `https://login.microsoftonline.com/${this.config.tenantId}/oauth2/v2.0/token`;
-    const body = new URLSearchParams({
-      grant_type: "client_credentials",
-      client_id: this.config.clientId,
-      client_secret: this.config.clientSecret,
-      scope: "https://graph.microsoft.com/.default",
-    });
-
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: body.toString(),
-    });
-
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Token fetch failed ${res.status}: ${text}`);
+  private async getOutlookAccessToken(): Promise<string> {
+    const now = Date.now();
+    if (this.outlookTokenCache && this.outlookTokenCache.expiresAt > now + 60_000) {
+      return this.outlookTokenCache.accessToken;
     }
-
-    const data = (await res.json()) as { access_token: string; expires_in: number };
-    this.tokenCache = {
-      accessToken: data.access_token,
-      expiresAt: now + data.expires_in * 1000,
-    };
-    return this.tokenCache.accessToken;
+    const { outlookTenantId, outlookClientId, outlookClientSecret } = this.config;
+    const token = await this.fetchToken(
+      outlookTenantId ?? this.config.tenantId,
+      outlookClientId!,
+      outlookClientSecret!,
+    );
+    this.outlookTokenCache = { accessToken: token, expiresAt: now + 55 * 60 * 1000 };
+    return token;
   }
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -266,6 +281,62 @@ export class SharepointClient {
       throw new SharepointApiError(res.status, "PUT", url, errBody);
     }
     return res.json() as Promise<DriveItem>;
+  }
+
+  // ── Transfer from Outlook ────────────────────────────────────────────────────
+  // Downloads an Outlook attachment as raw bytes server-side and uploads it to
+  // SharePoint. Binary data never passes through the agent's context window.
+
+  async transferFromOutlook(
+    messageId: string,
+    attachmentId: string,
+    destPath: string,
+    mimeType: string,
+    driveId?: string,
+  ): Promise<DriveItem & { transferredBytes: number }> {
+    const { outlookClientId, outlookClientSecret, outlookMailbox } = this.config;
+    if (!outlookClientId || !outlookClientSecret || !outlookMailbox) {
+      throw new Error(
+        "sharepoint_transfer_from_outlook requires OUTLOOK_CLIENT_ID, OUTLOOK_CLIENT_SECRET, " +
+        "and OUTLOOK_MAILBOX env vars to be set on the sharepoint MCP server.",
+      );
+    }
+
+    const outlookToken = await this.getOutlookAccessToken();
+
+    // Download raw bytes via /$value — no base64, no size limit
+    const dlUrl = `${GRAPH_BASE}/users/${outlookMailbox}/messages/${messageId}/attachments/${attachmentId}/$value`;
+    const dlRes = await fetch(dlUrl, {
+      headers: { Authorization: `Bearer ${outlookToken}` },
+    });
+    if (!dlRes.ok) {
+      let errBody: unknown;
+      try { errBody = await dlRes.json(); } catch { errBody = await dlRes.text(); }
+      throw new SharepointApiError(dlRes.status, "GET", dlUrl, errBody);
+    }
+    const bytes = Buffer.from(await dlRes.arrayBuffer());
+
+    // Upload straight to SharePoint
+    const siteId = await this.getSiteId();
+    const dId = driveId ?? (await this.getDefaultDriveId());
+    const encoded = encodeURIComponent(destPath).replace(/%2F/g, "/");
+    const spToken = await this.getAccessToken();
+    const upUrl = `${GRAPH_BASE}/sites/${siteId}/drives/${dId}/root:/${encoded}:/content`;
+    const upRes = await fetch(upUrl, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${spToken}`,
+        "Content-Type": mimeType,
+      },
+      body: bytes,
+    });
+    if (!upRes.ok) {
+      let errBody: unknown;
+      try { errBody = await upRes.json(); } catch { errBody = await upRes.text(); }
+      throw new SharepointApiError(upRes.status, "PUT", upUrl, errBody);
+    }
+    const item = await upRes.json() as DriveItem;
+    return { ...item, transferredBytes: bytes.length };
   }
 
   // ── Folder create ────────────────────────────────────────────────────────────

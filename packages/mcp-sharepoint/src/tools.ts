@@ -227,6 +227,22 @@ export function createToolDefinitions(client: SharepointClient): ToolDefinition[
       client,
     ),
 
+    // ── Transfer from Outlook ─────────────────────────────────────────────────
+    makeTool(
+      "sharepoint_transfer_from_outlook",
+      "Download an Outlook email attachment and upload it directly to SharePoint — binary never passes through the agent context window. Use instead of outlook_read_attachment + sharepoint_upload_binary for any file (PDF, image, DOCX, etc.). Requires OUTLOOK_CLIENT_ID, OUTLOOK_CLIENT_SECRET, and OUTLOOK_MAILBOX env vars on the sharepoint MCP server.",
+      z.object({
+        messageId: z.string().describe("Outlook message ID from outlook_list_attachments or outlook_search_emails"),
+        attachmentId: z.string().describe("Attachment ID from outlook_list_attachments"),
+        destPath: z.string().describe(filePathDesc + " — destination path in SharePoint, e.g. 'HR-Onboarding/John Doe - 2026-05-01/01_Raw_Submissions/resume.pdf'"),
+        mimeType: z.string().default("application/octet-stream").describe("MIME type of the file, e.g. 'application/pdf', 'image/jpeg'. Defaults to application/octet-stream if unknown."),
+        driveId: driveIdOpt,
+      }),
+      async ({ messageId, attachmentId, destPath, mimeType, driveId }) =>
+        client.transferFromOutlook(messageId, attachmentId, destPath, mimeType, driveId),
+      client,
+    ),
+
     // ── Delete ────────────────────────────────────────────────────────────────
     makeTool(
       "sharepoint_delete_item",

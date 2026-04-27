@@ -3,6 +3,11 @@ export interface SharepointMcpConfig {
   clientId: string;
   clientSecret: string;
   siteUrl: string;
+  // Optional Outlook credentials — required only for sharepoint_transfer_from_outlook tool
+  outlookTenantId?: string;
+  outlookClientId?: string;
+  outlookClientSecret?: string;
+  outlookMailbox?: string;
 }
 
 function requireEnv(env: NodeJS.ProcessEnv, key: string): string {
@@ -25,5 +30,9 @@ export function readConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Sharepo
       "SHAREPOINT_SITE_URL",
       "https://medicodio.sharepoint.com/sites/MedicodioMarketing",
     ),
+    outlookTenantId:     env["OUTLOOK_TENANT_ID"]?.trim(),
+    outlookClientId:     env["OUTLOOK_CLIENT_ID"]?.trim(),
+    outlookClientSecret: env["OUTLOOK_CLIENT_SECRET"]?.trim(),
+    outlookMailbox:      env["OUTLOOK_MAILBOX"]?.trim(),
   };
 }
