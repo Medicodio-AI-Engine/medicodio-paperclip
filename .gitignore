@@ -7,7 +7,13 @@ drizzle/meta/
 coverage/
 .DS_Store
 data/
-.paperclip/
+# Repo-local Paperclip state — secrets/data/logs/instances ignored, config+example committed
+.paperclip/data/
+.paperclip/logs/
+.paperclip/secrets/
+.paperclip/instances/
+.migration-backup/
+server/.paperclip/
 .pnpm-store/
 tmp-*
 cli/tmp/
@@ -56,3 +62,4 @@ tests/release-smoke/playwright-report/
 .log
 .yml
 .env.example
+!.paperclip/.env.example

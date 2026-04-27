@@ -125,15 +125,19 @@ Every audit-log row MUST use the `current_status` value from this table for the 
 **This is the first thing the routine checks on every trigger.**
 
 ```
-Step 1. Read `source` from trigger payload.
+Step 1. Read `source` and `messageId` from the run payload (PAPERCLIP_WAKE_PAYLOAD_JSON → payload field).
 
-IF source == "heartbeat_reply_detected":
-  → Extract from payload: case_id, messageId, employee_email, employee_full_name, current_status
+IF source == "api" AND messageId is present (non-empty string):
+  → This is a heartbeat-triggered reply run — do NOT run Phase 1/2/3
+  → Extract from payload: case_id, messageId, employee_email, employee_full_name,
+    employee_type, recruiter_or_hr_name, recruiter_or_hr_email,
+    human_in_loop_email, date_of_joining, current_status
   → Skip Phase 1, Phase 2, Phase 3 entirely
   → Jump directly to PHASE 4 — Process candidate reply
   → (Do NOT re-create folders, re-send emails, or re-log case_created)
 
-IF source == "manual" OR source == "issue_trigger" OR source is absent:
+IF source == "manual" OR (source == "api" AND messageId is absent or empty):
+  → This is a fresh onboarding trigger
   → Proceed to PHASE 1 — Validate inputs
 ```
 
@@ -356,7 +360,7 @@ Step 19. Append to audit-log.csv (CSV append pattern):
 
 Step 20. Post issue comment: "Waiting for candidate reply. Heartbeat polling active (every 30 min). Nudge cadence: Nudge 1 at 24h, Nudge 2 at 48h, stalled at 72h."
 
-Step 21. On heartbeat resume (source = heartbeat_reply_detected) → proceed to PHASE 4.
+Step 21. On heartbeat resume (source = "api" with messageId in payload) → proceed to PHASE 4.
 ```
 
 **Note:** If the case reaches `stalled` status, all automated actions stop. Human must manually intervene and update the issue to restart the process.
@@ -365,7 +369,7 @@ Step 21. On heartbeat resume (source = heartbeat_reply_detected) → proceed to 
 
 ## PHASE 4 — Process candidate reply
 
-**Entry point when triggered by heartbeat with `source: "heartbeat_reply_detected"`.**
+**Entry point when triggered by heartbeat with `source: "api"` AND `messageId` present in payload.**
 
 Use skill: [`skills/document-validator.md`](../skills/document-validator.md)  
 → Use `messageId` from payload directly — do NOT call `outlook_search_emails` again  
@@ -525,7 +529,7 @@ Step 35. Update case-tracker Status History:
 
 → IMPORTANT: After Step 35, the routine STOPS and awaits the next candidate reply.
   The heartbeat will detect the candidate's resubmission and re-trigger this routine
-  with source="heartbeat_reply_detected", which enters at PHASE 4 → PHASE 5 → PHASE 6
+  with source="api" + messageId in payload, which enters at PHASE 4 → PHASE 5 → PHASE 6
   (if issues remain) → PHASE 7 (if all complete).
   This loop repeats until all mandatory documents are present and valid.
 
@@ -708,13 +712,15 @@ Format: **pipe-delimited CSV** (`|`). Never use comma as delimiter.
 
 **Header row (first line of file — written once at creation):**
 ```
-timestamp|case_id|employee_email|employee_full_name|employee_type|human_in_loop_email|recruiter_or_hr_name|current_status|event|action_taken|brief_reason
+timestamp|case_id|employee_email|employee_full_name|employee_type|human_in_loop_email|recruiter_or_hr_name|current_status|event|action_taken|brief_reason|paperclip_issue_id
 ```
 
-**ALL 11 columns are mandatory on every row — no exceptions:**
+**ALL 12 columns are mandatory on every row — no exceptions:**
 ```
-{timestamp}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|{event}|{action_taken}|{brief_reason}
+{timestamp}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|{event}|{action_taken}|{brief_reason}|{paperclip_issue_id}
 ```
+
+- `paperclip_issue_id`: Paperclip UUID of the issue that triggered this run (`PAPERCLIP_TASK_ID`). Use `—` for rows written by heartbeat when no issue ID is available. **Legacy rows (11 columns, no `paperclip_issue_id` column):** treat as valid — read and preserve them as-is, append new rows with all 12 columns. Never rewrite or pad old rows.
 
 **Append pattern:** `sharepoint_read_file` → add new line at end → `sharepoint_write_file` with full content.
 

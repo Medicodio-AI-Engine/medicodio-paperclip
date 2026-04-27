@@ -241,7 +241,18 @@ export function createToolDefinitions(client: OutlookClient): ToolDefinition[] {
           if (name.endsWith(".pdf") || ct.includes("pdf")) {
             const parser = new PDFParse({ data: bytes });
             const result = await parser.getText();
-            return formatTextResponse({ name: att.name, contentType: att.contentType, extractedText: result.text, pages: result.total });
+            const text = result.text?.trim() ?? "";
+            if (!text) {
+              // No text layer — scanned/image-only PDF. Return metadata so agent can flag for human review.
+              return formatTextResponse({
+                name: att.name,
+                contentType: att.contentType,
+                extractedText: "",
+                pages: result.total,
+                warning: "SCANNED_PDF_NO_TEXT: This PDF has no extractable text layer. It is likely a scanned image. The agent must flag this document for manual human review — do not attempt to validate its contents automatically.",
+              });
+            }
+            return formatTextResponse({ name: att.name, contentType: att.contentType, extractedText: text, pages: result.total });
           }
 
           // Plain text variants

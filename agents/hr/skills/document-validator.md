@@ -23,7 +23,7 @@ For each attachment, call `outlook_read_attachment`:
 
 | File type | Supported | What you get |
 |-----------|-----------|-------------|
-| `.pdf` | ✅ Yes | `extractedText` — full plain text from all pages |
+| `.pdf` | ✅/⚠️ | `extractedText` — full plain text from all pages. If response contains `warning: "SCANNED_PDF_NO_TEXT"`, the PDF is a scanned image with no text layer — treat as `needs_manual_review`, notify `human_in_loop_email`, and ask candidate to re-send as a JPG/PNG image or a text-layer PDF |
 | `.docx` | ✅ Yes | `extractedText` — full plain text from the document |
 | `.txt / .csv / .md` | ✅ Yes | `text` — raw file content |
 | `.jpg / .jpeg` | ✅ Yes | Image content block — Claude vision reads it directly |

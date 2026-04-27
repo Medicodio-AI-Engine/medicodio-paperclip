@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { and, asc, desc, eq, inArray, isNotNull, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lte, ne, not, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -691,6 +691,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
     variables?: Record<string, unknown> | null;
     projectId?: string | null;
     assigneeAgentId?: string | null;
+    parentIssueId?: string | null;
     idempotencyKey?: string | null;
     executionWorkspaceId?: string | null;
     executionWorkspacePreference?: string | null;
@@ -723,6 +724,9 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
               eq(routineRuns.source, input.source),
               eq(routineRuns.idempotencyKey, input.idempotencyKey),
               input.trigger ? eq(routineRuns.triggerId, input.trigger.id) : isNull(routineRuns.triggerId),
+              // failed/cancelled/skipped runs don't count — allow retry with same idempotency key
+              // skipped = concurrency policy prevented execution; work was never done
+              not(inArray(routineRuns.status, ["failed", "cancelled", "skipped"])),
             ),
           )
           .orderBy(desc(routineRuns.createdAt))
@@ -776,7 +780,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
           createdIssue = await issueSvc.create(input.routine.companyId, {
             projectId,
             goalId: input.routine.goalId,
-            parentId: input.routine.parentIssueId,
+            parentId: input.parentIssueId ?? input.routine.parentIssueId,
             title,
             description,
             status: "todo",
@@ -1288,6 +1292,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
         variables: input.variables as Record<string, unknown> | null | undefined,
         projectId: input.projectId ?? null,
         assigneeAgentId: input.assigneeAgentId ?? null,
+        parentIssueId: input.parentIssueId ?? null,
         idempotencyKey: input.idempotencyKey,
         executionWorkspaceId: input.executionWorkspaceId ?? null,
         executionWorkspacePreference: input.executionWorkspacePreference ?? null,

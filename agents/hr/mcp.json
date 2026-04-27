@@ -2,7 +2,7 @@
   "mcpServers": {
     "sharepoint": {
       "command": "/usr/local/bin/node",
-      "args": ["/Users/karthikkhatavkar/medicodio-paperclip/packages/mcp-sharepoint/dist/stdio.js"],
+      "args": ["./packages/mcp-sharepoint/dist/stdio.js"],
       "env": {
         "SHAREPOINT_TENANT_ID": "${SHAREPOINT_TENANT_ID}",
         "SHAREPOINT_CLIENT_ID": "${SHAREPOINT_CLIENT_ID}",
@@ -12,12 +12,19 @@
     },
     "outlook": {
       "command": "/usr/local/bin/node",
-      "args": ["/Users/karthikkhatavkar/medicodio-paperclip/packages/mcp-outlook/dist/stdio.js"],
+      "args": ["./packages/mcp-outlook/dist/stdio.js"],
       "env": {
         "OUTLOOK_TENANT_ID": "${SHAREPOINT_TENANT_ID}",
         "OUTLOOK_CLIENT_ID": "${OUTLOOK_CLIENT_ID}",
         "OUTLOOK_CLIENT_SECRET": "${OUTLOOK_CLIENT_SECRET}",
         "OUTLOOK_MAILBOX": "${OUTLOOK_MAILBOX}"
+      }
+    },
+    "resend": {
+      "command": "/usr/local/bin/node",
+      "args": ["./packages/mcp-resend/dist/stdio.js"],
+      "env": {
+        "RESEND_API_KEY": "${RESEND_API_KEY}"
       }
     },
     "duckduckgo": {

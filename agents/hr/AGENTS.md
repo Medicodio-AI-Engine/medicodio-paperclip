@@ -22,6 +22,21 @@ HR-Onboarding/
 
 ---
 
+## Email: Resend vs Outlook
+
+| Use case | Tool |
+|----------|------|
+| Bulk outreach / marketing (3+ recipients) | `resend_send_batch` |
+| Single marketing email | `resend_send_email` |
+| Reply to specific incoming email | `outlook_reply` |
+| Read employee replies / inbox | `outlook_*` (Resend = outbound only) |
+| Forward documents | `outlook_forward` |
+| 1:1 transactional HR email (onboarding etc.) | `outlook_send_email` |
+
+Resend `from` address must use `medicodio.site` domain (e.g. `Medicodio HR <hr@medicodio.site>`).
+
+---
+
 ## Outlook
 
 Send all candidate and HR notification emails via the `outlook` MCP.

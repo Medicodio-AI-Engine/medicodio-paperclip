@@ -5,7 +5,7 @@ import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 
 // Load .env manually
-const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../.env");
+const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../.paperclip/.env");
 for (const line of readFileSync(envPath, "utf8").split("\n")) {
   const trimmed = line.trim();
   if (!trimmed || trimmed.startsWith("#")) continue;
