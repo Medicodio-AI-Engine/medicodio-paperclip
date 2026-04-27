@@ -606,6 +606,10 @@ Step 42. Wait for approval.
 
 ## PHASE 9 — SharePoint upload (on approval)
 
+**Critical rule:** Never transform, OCR-extract, or summarise attachment content before upload.
+Always download the original binary file from Outlook and store it verbatim in SharePoint.
+Never write an empty file — validate non-zero size before every write.
+
 ```
 Step 43. On human approval received:
 
@@ -614,46 +618,54 @@ Step 44. Set status = sharepoint_upload_in_progress
 Step 45. Append to audit-log.csv (CSV append pattern):
     {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|sharepoint_upload_in_progress|human_approved|Human approved — SharePoint upload started|—
 
-Step 46. For each verified document:
-    Resolve contentBytes and contentType using this order:
-    a. If the document was processed in Phase 5 of THIS run (contentBytes is in current context) → use it directly.
-    b. If the document was accepted in a PREVIOUS run (not in current context):
-       → sharepoint_read_file path="HR-Onboarding/{employee_full_name} - {date_of_joining}/case-tracker.md"
-       → Parse the Attachment Lookup table — find the MOST RECENT row where Filename = {filename}
-       → Call: outlook_read_attachment messageId="{row.messageId}" attachmentId="{row.attachmentId}"
-       → Extract contentBytes and contentType from that response
+Step 46. For each verified document, follow this exact sequence:
 
-    Then upload:
-    sharepoint_upload_binary
+    STEP 46a — Resolve (messageId, attachmentId) for this file:
+    - If processed in Phase 5 of THIS run → use messageId + attachmentId already in context.
+    - If accepted in a PREVIOUS run → read case-tracker.md Attachment Lookup table,
+      find the MOST RECENT row where Filename = {filename}, extract messageId + attachmentId.
+
+    STEP 46b — Download the original attachment binary (up to 3 attempts):
+    outlook_read_attachment messageId="{messageId}" attachmentId="{attachmentId}"
+    → Extract: contentBytes (base64 string), contentType (MIME type), size (bytes)
+    → On failure: wait 10 s, retry. After 3 failures → escalate (see Step 49), skip this file.
+
+    STEP 46c — Validate before writing (MANDATORY — never skip):
+    - contentBytes MUST be non-null and non-empty string.
+    - Decoded byte length MUST be > 0 (size > 0).
+    - contentType MUST match expected format for the document type
+      (e.g. PDF → application/pdf, image → image/jpeg or image/png, DOCX → application/vnd.openxmlformats...).
+    - If ANY check fails → do NOT write to SharePoint. Log the failure, escalate via Step 49.
+
+    STEP 46d — Upload original binary to SharePoint (up to 3 attempts):
+    sharepoint_write_file
     filePath="HR-Onboarding/{employee_full_name} - {date_of_joining}/02_Verified_Documents/{filename}"
-    contentBase64="{contentBytes}"
-    mimeType="{contentType}"
+    content="{base64-decoded raw bytes}"
+    → On HTTP 429 or 503: wait 10 s, retry. After 3 failures → escalate (see Step 49).
 
-    SharePoint error handling (applies to all sharepoint_upload_binary and sharepoint_read_file calls):
-    - On HTTP 429 (rate limited) or 503 (service unavailable): wait 10 seconds and retry, up to 3 attempts
-    - On 3rd failure: set status = escalated, append escalation row to audit-log, notify human_in_loop_email with:
-      the operation that failed, the exact file path, the error code and message. Do NOT silently drop data.
+    STEP 46e — Post-upload integrity check:
+    sharepoint_get_file_info
+    filePath="HR-Onboarding/{employee_full_name} - {date_of_joining}/02_Verified_Documents/{filename}"
+    → Confirm returned size > 0.
+    → If size = 0 or file not found → delete the empty file, escalate via Step 49.
 
-Step 47. For each raw submission file:
-    Resolve contentBytes and contentType using the same two-step logic as Step 46 (current context first, then Attachment Lookup table re-fetch if needed).
-
-    Then upload:
-    sharepoint_upload_binary
-    filePath="HR-Onboarding/{employee_full_name} - {date_of_joining}/01_Raw_Submissions/{filename}"
-    contentBase64="{contentBytes}"
-    mimeType="{contentType}"
-    (same retry logic as Step 46)
+Step 47. For each raw submission file, apply the identical 46a–46e sequence:
+    Target path: "HR-Onboarding/{employee_full_name} - {date_of_joining}/01_Raw_Submissions/{filename}"
+    (same download → validate → upload → integrity-check logic)
 
 Step 48. If any discrepancy notes exist:
     sharepoint_write_file
     path="HR-Onboarding/{employee_full_name} - {date_of_joining}/03_Exception_Notes/discrepancy-log.md"
 
-Step 49. If upload fails after retries:
+Step 49. Escalation on any unrecoverable failure (download, validation, or upload):
     → set status = escalated
     → Append to audit-log.csv (CSV append pattern):
-      {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|escalated|escalated|SharePoint upload failed after retries|Path: {path} Error: {error}
-    → outlook_send_email to human_in_loop_email with: folder path, files uploaded, files failed, error summary
-    → STOP
+      {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|escalated|escalated|Phase 9 failure after retries|Path: {path} Stage: {46b|46c|46d|46e} Error: {error}
+    → outlook_send_email to human_in_loop_email:
+      subject: "HR Alert: SharePoint upload failure — {employee_full_name}"
+      body: folder path, filename, failure stage, error detail, files successfully uploaded so far
+    → Continue to next file (do NOT stop entire upload for one failed file unless ALL files fail)
+    → If ALL files fail → STOP, leave status = escalated
 
 Step 50. Set status = uploaded_to_sharepoint
 
