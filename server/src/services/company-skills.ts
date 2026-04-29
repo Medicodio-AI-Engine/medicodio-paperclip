@@ -708,6 +708,27 @@ export function parseSkillImportSourceInput(rawInput: string): ParsedSkillImport
   };
 }
 
+function resolveRepoRoot(): string {
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  // Walk up from server/src/services → server/src → server → repo root
+  let dir = moduleDir;
+  for (let i = 0; i < 5; i++) {
+    const pkg = path.join(dir, "package.json");
+    try {
+      const content = JSON.parse(require("node:fs").readFileSync(pkg, "utf8"));
+      if (content.workspaces) return dir;
+    } catch {}
+    dir = path.dirname(dir);
+  }
+  return process.cwd();
+}
+
+function toRelativeIfPossible(absPath: string): string {
+  const root = resolveRepoRoot();
+  const prefix = root + path.sep;
+  return absPath.startsWith(prefix) ? absPath.slice(prefix.length) : absPath;
+}
+
 function resolveBundledSkillsRoot() {
   const moduleDir = path.dirname(fileURLToPath(import.meta.url));
   return [
@@ -921,10 +942,7 @@ export async function readLocalSkillImportFromDirectory(
     ...(options?.metadata ?? {}),
   };
   const inventory = await collectLocalSkillInventory(resolvedSkillDir, options?.inventoryMode ?? "full");
-  const cwd = process.cwd();
-  const storedLocator = resolvedSkillDir.startsWith(cwd + path.sep)
-    ? resolvedSkillDir.slice(cwd.length + 1)
-    : resolvedSkillDir;
+  const storedLocator = toRelativeIfPossible(resolvedSkillDir);
 
   return {
     key: deriveCanonicalSkillKey(companyId, {
@@ -998,20 +1016,22 @@ async function readLocalSkillImports(companyId: string, sourcePath: string): Pro
     const inventory: CompanySkillFileInventoryEntry[] = [
       { path: "SKILL.md", kind: "skill" },
     ];
+    const skillDir = path.dirname(resolvedPath);
+    const storedLocator = toRelativeIfPossible(skillDir);
     return [{
       key: deriveCanonicalSkillKey(companyId, {
         slug,
         sourceType: "local_path",
-        sourceLocator: path.dirname(resolvedPath),
+        sourceLocator: storedLocator,
         metadata,
       }),
       slug,
       name: asString(parsed.frontmatter.name) ?? slug,
       description: asString(parsed.frontmatter.description),
       markdown,
-      packageDir: path.dirname(resolvedPath),
+      packageDir: skillDir,
       sourceType: "local_path",
-      sourceLocator: path.dirname(resolvedPath),
+      sourceLocator: storedLocator,
       sourceRef: null,
       trustLevel: deriveTrustLevel(inventory),
       compatibility: "compatible",
