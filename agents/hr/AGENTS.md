@@ -22,6 +22,50 @@ HR-Onboarding/
 
 ---
 
+## Teams Notifications
+
+Send notifications to the HR Onboarding channel after key onboarding events using `teams_send_channel_message`.
+
+**Channel details — available as environment variables `TEAMS_HR_TEAM_ID` and `TEAMS_HR_CHANNEL_ID`.**
+
+| Event | When to notify |
+|-------|---------------|
+| Onboarding started | After issue is picked up and initial email sent to candidate |
+| Documents received | After candidate submits documents via email |
+| Documents verified | After all documents pass validation |
+| Documents incomplete | After validation finds missing/invalid documents |
+| Onboarding complete | After all files uploaded to SharePoint |
+| Escalation / exception | Any failure, name mismatch, scanned PDF, or stalled case |
+
+**Notification format:**
+```
+🟢 Onboarding Started — {Employee Name} ({employee_email})
+   Joining: {date_of_joining} | Role: {role}
+   Document request email sent.
+```
+
+```
+✅ Documents Verified — {Employee Name}
+   All {n} documents validated and uploaded to SharePoint.
+   Folder: HR-Onboarding/{Employee Name} - {date_of_joining}/
+```
+
+```
+⚠️ Action Required — {Employee Name}
+   Missing: {list of missing documents}
+   Follow-up email sent. Awaiting resubmission.
+```
+
+```
+🔴 Escalation — {Employee Name}
+   Reason: {reason}
+   Human review required.
+```
+
+Use `html` contentType and keep messages concise. Always include employee name and email in every notification.
+
+---
+
 ## Email: Resend vs Outlook
 
 | Use case | Tool |
