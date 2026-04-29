@@ -5,16 +5,30 @@ import { findEmail, searchDomain, verifyEmail, discoverDomain, enrichCompany, en
 export function registerTools(server: McpServer) {
   server.tool(
     "hunter_find_email",
-    "Find the email address of a specific person by first name, last name, and company domain.",
+    "Find the most likely email address for a person. Provide domain OR company name (domain preferred). Provide first+last name OR full_name OR linkedin_handle. Automatically verifies the found email. Uses 1 search credit.",
     {
-      first_name: z.string().describe("Person's first name"),
-      last_name: z.string().describe("Person's last name"),
-      domain: z.string().describe("Company domain e.g. 'surgicare.com'"),
+      first_name: z.string().optional().describe("Person's first name"),
+      last_name: z.string().optional().describe("Person's last name"),
+      full_name: z.string().optional().describe("Person's full name (use if first/last not available)"),
+      domain: z.string().optional().describe("Company domain e.g. 'surgicare.com' (preferred over company)"),
+      company: z.string().optional().describe("Company name e.g. 'Surgicare' (used if domain unknown)"),
+      linkedin_handle: z.string().optional().describe("LinkedIn profile handle (alternative to name+domain)"),
+      max_duration: z.number().min(3).max(20).optional().describe("Max seconds for verification (3–20, default 10). Higher = more accurate."),
     },
-    async ({ first_name, last_name, domain }) => {
-      const result = await findEmail({ firstName: first_name, lastName: last_name, domain });
+    async ({ first_name, last_name, full_name, domain, company, linkedin_handle, max_duration }) => {
+      const result = await findEmail({
+        firstName: first_name,
+        lastName: last_name,
+        fullName: full_name,
+        domain,
+        company,
+        linkedinHandle: linkedin_handle,
+        maxDuration: max_duration,
+      });
       if (!result.email) {
-        return { content: [{ type: "text", text: `No email found for ${first_name} ${last_name} at ${domain}` }] };
+        const identifier = full_name ?? [first_name, last_name].filter(Boolean).join(" ") ?? linkedin_handle ?? "person";
+        const location = domain ?? company ?? "unknown company";
+        return { content: [{ type: "text", text: `No email found for ${identifier} at ${location}` }] };
       }
       return {
         content: [{
@@ -22,8 +36,13 @@ export function registerTools(server: McpServer) {
           text: JSON.stringify({
             email: result.email,
             score: result.score,
+            verification_status: result.verification?.status ?? null,
+            accept_all: result.accept_all,
             position: result.position,
+            company: result.company,
+            domain: result.domain,
             linkedin_url: result.linkedin_url,
+            phone_number: result.phone_number,
             sources: result.sources.slice(0, 3),
           }, null, 2),
         }],
@@ -48,14 +67,18 @@ export function registerTools(server: McpServer) {
           text: JSON.stringify({
             organization: result.organization,
             email_pattern: result.pattern,
+            accept_all: result.accept_all,
             total: result.emails.length,
             emails: result.emails.map((e) => ({
               email: e.value,
               name: [e.first_name, e.last_name].filter(Boolean).join(" "),
               position: e.position,
+              seniority: e.seniority,
               department: e.department,
               confidence: e.confidence,
+              verification_status: e.verification?.status ?? null,
               linkedin: e.linkedin,
+              phone_number: e.phone_number,
             })),
           }, null, 2),
         }],
@@ -65,7 +88,7 @@ export function registerTools(server: McpServer) {
 
   server.tool(
     "hunter_verify_email",
-    "Verify if an email address is deliverable before sending. Returns deliverable/undeliverable/risky/unknown.",
+    "Verify deliverability of an email address. Uses 1 verification credit. status: valid/invalid/accept_all/webmail/disposable/unknown. result (deliverable/undeliverable/risky) is deprecated — use status.",
     {
       email: z.string().email().describe("Email address to verify"),
     },
@@ -76,11 +99,17 @@ export function registerTools(server: McpServer) {
           type: "text",
           text: JSON.stringify({
             email: result.email,
+            status: result.status,
             result: result.result,
             score: result.score,
             mx_records: result.mx_records,
+            smtp_server: result.smtp_server,
             smtp_check: result.smtp_check,
+            accept_all: result.accept_all,
             disposable: result.disposable,
+            webmail: result.webmail,
+            gibberish: result.gibberish,
+            block: result.block,
           }, null, 2),
         }],
       };

@@ -40,6 +40,7 @@
 | `recruiter_or_hr_email` | HR/recruiter email |
 | `human_in_loop_name` | Human reviewer name |
 | `human_in_loop_email` | Human reviewer email |
+| `phone_number` | Candidate's contact phone number |
 
 ### Optional
 `alternate_candidate_email`, `date_of_birth` (ISO format, e.g. `1995-06-15` — used for doc identity verification in Phase 5), `hiring_manager_name`, `hiring_manager_email`, `business_unit`, `location`, `joining_mode`, `notes_from_hr`, `special_document_requirements`
@@ -132,7 +133,7 @@ IF source == "api" AND messageId is present (non-empty string):
   → This is a heartbeat-triggered reply run — do NOT run Phase 1/2/3
   → Extract from payload: case_id, messageId, employee_email, employee_full_name,
     employee_type, recruiter_or_hr_name, recruiter_or_hr_email,
-    human_in_loop_email, date_of_joining, current_status
+    human_in_loop_email, date_of_joining, current_status, phone_number
   → Skip Phase 1, Phase 2, Phase 3 entirely
   → Jump directly to PHASE 4 — Process candidate reply
   → (Do NOT re-create folders, re-send emails, or re-log case_created)
@@ -191,6 +192,7 @@ Step 11. Create per-employee case tracker:
     |-------|-------|
     | Name | {employee_full_name} |
     | Email | {employee_email} |
+    | Phone | {phone_number} |
     | Role | {role} |
     | Type | {employee_type} |
     | Joining Date | {date_of_joining} |
@@ -581,7 +583,7 @@ Step 39. outlook_send_email to human_in_loop_email
     subject: "HR Action Required: Verify onboarding documents for {employee_full_name}"
     isHtml: true
     body includes:
-    - employee_full_name, employee_email, role, employee_type, date_of_joining
+    - employee_full_name, employee_email, phone_number, role, employee_type, date_of_joining
     - current_status
     - summary_of_action_taken
     - missing_documents (if any)
@@ -732,10 +734,12 @@ Step 54b. Send IT setup notification email.
         joining date.
 
         New Joiner Details:
-        - Name:          {employee_full_name}
-        - Role:          {role}
+        - Name:            {employee_full_name}
+        - Role:            {role}
         - Date of Joining: {date_of_joining}
-        - Employee Type: {employee_type}
+        - Employee Type:   {employee_type}
+        - Phone Number:    {phone_number}
+        - Contact Email:   {employee_email}
 
         Action Required — please ensure the following are ready by {date_of_joining}:
         1. Laptop / workstation provisioned and configured

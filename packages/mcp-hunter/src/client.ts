@@ -3,12 +3,17 @@ import { config } from "./config.js";
 interface HunterEmailFinderResult {
   email: string | null;
   score: number;
-  sources: Array<{ domain: string; uri: string; extracted_on: string }>;
+  sources: Array<{ domain: string; uri: string; extracted_on: string; last_seen_on: string; still_on_page: boolean }>;
   first_name: string | null;
   last_name: string | null;
   position: string | null;
   twitter: string | null;
   linkedin_url: string | null;
+  phone_number: string | null;
+  company: string | null;
+  domain: string | null;
+  accept_all: boolean;
+  verification: { date: string; status: "valid" | "accept_all" | "unknown" } | null;
 }
 
 interface HunterDomainSearchResult {
@@ -25,16 +30,21 @@ interface HunterDomainSearchResult {
     first_name: string | null;
     last_name: string | null;
     position: string | null;
+    position_raw: string | null;
+    seniority: string | null;
     department: string | null;
     linkedin: string | null;
     twitter: string | null;
-    sources: Array<{ domain: string; uri: string; extracted_on: string }>;
+    phone_number: string | null;
+    verification: { date: string; status: "valid" | "invalid" | "accept_all" | "unknown" } | null;
+    sources: Array<{ domain: string; uri: string; extracted_on: string; last_seen_on: string; still_on_page: boolean }>;
   }>;
 }
 
 interface HunterEmailVerifyResult {
   email: string;
-  result: "deliverable" | "undeliverable" | "risky" | "unknown";
+  status: "valid" | "invalid" | "accept_all" | "webmail" | "disposable" | "unknown";
+  result: "deliverable" | "undeliverable" | "risky"; // deprecated, prefer status
   score: number;
   regexp: boolean;
   gibberish: boolean;
@@ -45,7 +55,7 @@ interface HunterEmailVerifyResult {
   smtp_check: boolean;
   accept_all: boolean;
   block: boolean;
-  sources: Array<{ domain: string; uri: string; extracted_on: string }>;
+  sources: Array<{ domain: string; uri: string; extracted_on: string; last_seen_on: string; still_on_page: boolean }>;
 }
 
 interface HunterDiscoverResult {
@@ -129,14 +139,22 @@ async function request<T>(path: string, params: Record<string, string> = {}, met
 }
 
 export async function findEmail(params: {
-  firstName: string;
-  lastName: string;
-  domain: string;
+  firstName?: string;
+  lastName?: string;
+  fullName?: string;
+  domain?: string;
+  company?: string;
+  linkedinHandle?: string;
+  maxDuration?: number;
 }): Promise<HunterEmailFinderResult> {
   return request<HunterEmailFinderResult>("/email-finder", {
-    first_name: params.firstName,
-    last_name: params.lastName,
-    domain: params.domain,
+    ...(params.firstName ? { first_name: params.firstName } : {}),
+    ...(params.lastName ? { last_name: params.lastName } : {}),
+    ...(params.fullName ? { full_name: params.fullName } : {}),
+    ...(params.domain ? { domain: params.domain } : {}),
+    ...(params.company ? { company: params.company } : {}),
+    ...(params.linkedinHandle ? { linkedin_handle: params.linkedinHandle } : {}),
+    ...(params.maxDuration ? { max_duration: String(params.maxDuration) } : {}),
   });
 }
 

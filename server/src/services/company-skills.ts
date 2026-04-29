@@ -921,12 +921,16 @@ export async function readLocalSkillImportFromDirectory(
     ...(options?.metadata ?? {}),
   };
   const inventory = await collectLocalSkillInventory(resolvedSkillDir, options?.inventoryMode ?? "full");
+  const cwd = process.cwd();
+  const storedLocator = resolvedSkillDir.startsWith(cwd + path.sep)
+    ? resolvedSkillDir.slice(cwd.length + 1)
+    : resolvedSkillDir;
 
   return {
     key: deriveCanonicalSkillKey(companyId, {
       slug,
       sourceType: "local_path",
-      sourceLocator: resolvedSkillDir,
+      sourceLocator: storedLocator,
       metadata,
     }),
     slug,
@@ -935,7 +939,7 @@ export async function readLocalSkillImportFromDirectory(
     markdown,
     packageDir: resolvedSkillDir,
     sourceType: "local_path",
-    sourceLocator: resolvedSkillDir,
+    sourceLocator: storedLocator,
     sourceRef: null,
     trustLevel: deriveTrustLevel(inventory),
     compatibility: "compatible",
@@ -1346,7 +1350,9 @@ function resolveDesiredSkillKeys(
 
 function normalizeSkillDirectory(skill: SkillSourceInfoTarget) {
   if ((skill.sourceType !== "local_path" && skill.sourceType !== "catalog") || !skill.sourceLocator) return null;
-  const resolved = path.resolve(skill.sourceLocator);
+  const resolved = path.isAbsolute(skill.sourceLocator)
+    ? skill.sourceLocator
+    : path.resolve(process.cwd(), skill.sourceLocator);
   if (path.basename(resolved).toLowerCase() === "skill.md") {
     return path.dirname(resolved);
   }
@@ -1355,7 +1361,9 @@ function normalizeSkillDirectory(skill: SkillSourceInfoTarget) {
 
 function normalizeSourceLocatorDirectory(sourceLocator: string | null) {
   if (!sourceLocator) return null;
-  const resolved = path.resolve(sourceLocator);
+  const resolved = path.isAbsolute(sourceLocator)
+    ? sourceLocator
+    : path.resolve(process.cwd(), sourceLocator);
   return path.basename(resolved).toLowerCase() === "skill.md" ? path.dirname(resolved) : resolved;
 }
 

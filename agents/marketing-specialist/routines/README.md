@@ -5,6 +5,7 @@
 | Routine | Schedule | File |
 |---------|----------|------|
 | Daily Lead Outreach | 22:30 IST daily (17:00 UTC) | [daily-lead-outreach.md](daily-lead-outreach.md) |
+| Event Outreach | Manual (per event) | [event-outreach.md](event-outreach.md) |
 
 ---
 

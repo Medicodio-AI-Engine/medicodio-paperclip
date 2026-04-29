@@ -129,6 +129,7 @@ get-actor-output  runId="<runId from response>"  limit=50
 Injected automatically by Paperclip at runtime:
 - `SHAREPOINT_TENANT_ID`, `SHAREPOINT_CLIENT_ID`, `SHAREPOINT_CLIENT_SECRET` — used by MCP server (transparent to you)
 - `SHAREPOINT_SITE_URL` — defaults to MedicodioMarketing site
+- `HUNTER_API_KEY` — injected for Hunter MCP server (email finder + verifier)
 - All standard `PAPERCLIP_*` vars for task management
 
 ---
@@ -159,3 +160,25 @@ Full step-by-step instructions: [`routines/daily-lead-outreach.md`](routines/dai
 **Concurrency:** `skip_if_active` — if prior run still awaiting approval, today's run is skipped automatically.
 
 When this routine fires, read `routines/daily-lead-outreach.md` and follow every step exactly.
+
+### Event Outreach (`event-outreach`)
+
+Fires **manually** — triggered by creating a Paperclip issue with `event_slug: {slug}` in the description.
+
+Full step-by-step instructions: [`routines/event-outreach.md`](routines/event-outreach.md)
+
+**Summary of what you do each run:**
+1. PRE-CHECK A — delivery status: check Outlook bounces for rows sent >24hrs ago, update Excel
+2. PRE-CHECK B — reply check: scan inbox for replies, classify intent, notify on demo interest
+3. Read `Marketing-Specialist/event-outreach/{event_slug}/config.md` from SharePoint
+4. Load attendee Excel, auto-detect column map on first run (cached to `column-map.md`)
+5. Split batch: has email vs missing email
+6. For missing emails: DuckDuckGo → domain → `hunter_find_email` → fallback `hunter_search_domain` → `hunter_verify_email`
+7. Sufficiency check — send if threshold met
+8. Send/draft emails using `email-template.html` from SharePoint (all placeholders replaced)
+9. Write 16 audit columns back to Excel
+10. Notify reviewer if `send_mode: draft_review`
+
+**Concurrency:** `skip_if_active` — one event run at a time.
+
+When this routine fires, read `routines/event-outreach.md` and follow every step exactly.
