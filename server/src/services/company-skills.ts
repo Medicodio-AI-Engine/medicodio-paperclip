@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { promises as fs, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, asc, eq } from "drizzle-orm";
@@ -715,7 +715,7 @@ function resolveRepoRoot(): string {
   for (let i = 0; i < 5; i++) {
     const pkg = path.join(dir, "package.json");
     try {
-      const content = JSON.parse(require("node:fs").readFileSync(pkg, "utf8"));
+      const content = JSON.parse(readFileSync(pkg, "utf8"));
       if (content.workspaces) return dir;
     } catch {}
     dir = path.dirname(dir);
