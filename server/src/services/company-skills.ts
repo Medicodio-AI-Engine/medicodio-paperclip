@@ -710,12 +710,16 @@ export function parseSkillImportSourceInput(rawInput: string): ParsedSkillImport
 
 function resolveRepoRoot(): string {
   const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-  // Walk up from server/src/services → server/src → server → repo root
   let dir = moduleDir;
-  for (let i = 0; i < 5; i++) {
-    const pkg = path.join(dir, "package.json");
+  for (let i = 0; i < 6; i++) {
+    // pnpm monorepo uses pnpm-workspace.yaml (no "workspaces" in package.json)
     try {
-      const content = JSON.parse(readFileSync(pkg, "utf8"));
+      readFileSync(path.join(dir, "pnpm-workspace.yaml"), "utf8");
+      return dir;
+    } catch {}
+    // fallback: package.json with workspaces (npm/yarn monorepos)
+    try {
+      const content = JSON.parse(readFileSync(path.join(dir, "package.json"), "utf8"));
       if (content.workspaces) return dir;
     } catch {}
     dir = path.dirname(dir);
@@ -1372,7 +1376,7 @@ function normalizeSkillDirectory(skill: SkillSourceInfoTarget) {
   if ((skill.sourceType !== "local_path" && skill.sourceType !== "catalog") || !skill.sourceLocator) return null;
   const resolved = path.isAbsolute(skill.sourceLocator)
     ? skill.sourceLocator
-    : path.resolve(process.cwd(), skill.sourceLocator);
+    : path.resolve(resolveRepoRoot(), skill.sourceLocator);
   if (path.basename(resolved).toLowerCase() === "skill.md") {
     return path.dirname(resolved);
   }
@@ -1383,7 +1387,7 @@ function normalizeSourceLocatorDirectory(sourceLocator: string | null) {
   if (!sourceLocator) return null;
   const resolved = path.isAbsolute(sourceLocator)
     ? sourceLocator
-    : path.resolve(process.cwd(), sourceLocator);
+    : path.resolve(resolveRepoRoot(), sourceLocator);
   return path.basename(resolved).toLowerCase() === "skill.md" ? path.dirname(resolved) : resolved;
 }
 
