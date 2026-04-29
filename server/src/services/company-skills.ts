@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { promises as fs, readFileSync } from "node:fs";
+import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveRepoRoot, toRelativeIfPossible } from "../utils/repo-root.js";
 import { and, asc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { companies, companySkills } from "@paperclipai/db";
@@ -706,31 +707,6 @@ export function parseSkillImportSourceInput(rawInput: string): ParsedSkillImport
     originalSkillsShUrl: null,
     warnings,
   };
-}
-
-function resolveRepoRoot(): string {
-  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-  let dir = moduleDir;
-  for (let i = 0; i < 6; i++) {
-    // pnpm monorepo uses pnpm-workspace.yaml (no "workspaces" in package.json)
-    try {
-      readFileSync(path.join(dir, "pnpm-workspace.yaml"), "utf8");
-      return dir;
-    } catch {}
-    // fallback: package.json with workspaces (npm/yarn monorepos)
-    try {
-      const content = JSON.parse(readFileSync(path.join(dir, "package.json"), "utf8"));
-      if (content.workspaces) return dir;
-    } catch {}
-    dir = path.dirname(dir);
-  }
-  return process.cwd();
-}
-
-function toRelativeIfPossible(absPath: string): string {
-  const root = resolveRepoRoot();
-  const prefix = root + path.sep;
-  return absPath.startsWith(prefix) ? absPath.slice(prefix.length) : absPath;
 }
 
 function resolveBundledSkillsRoot() {
