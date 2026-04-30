@@ -342,6 +342,23 @@ Step 17. Update case-tracker Status History:
     sharepoint_write_file (append row)
     path="HR-Onboarding/{employee_full_name} - {date_of_joining}/case-tracker.md"
     → Add row: | {now} | initial_email_sent | Document request email sent to {employee_email} |
+
+Step 17a. Teams notification (non-blocking):
+  teams_send_channel_message
+    teamId    = $TEAMS_HR_TEAM_ID
+    channelId = $TEAMS_HR_CHANNEL_ID
+    contentType = "html"
+    content:
+      🟢 Onboarding Started — {employee_full_name}<br>
+      <br>
+      Role: {role} ({employee_type})<br>
+      Joining: {date_of_joining}<br>
+      Email: {employee_email}<br>
+      HR Contact: {recruiter_or_hr_name}<br>
+      Case: {issue_identifier}<br>
+      <br>
+      Document request email sent. Awaiting candidate submission.
+  If it fails → add "⚠️ Teams notification failed: {error}" to issue comment and continue.
 ```
 
 ---
@@ -418,6 +435,22 @@ Step 24. Append to audit-log.csv (CSV append pattern):
     {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{partial_or_complete_status}|{event}|Candidate reply classified: {classification}|{attachment_count} attachments received
 
 Step 25. Post issue comment with classification and what was received.
+
+Step 25a. Teams notification (non-blocking):
+  teams_send_channel_message
+    teamId    = $TEAMS_HR_TEAM_ID
+    channelId = $TEAMS_HR_CHANNEL_ID
+    contentType = "html"
+    content:
+      📄 Documents Received — {employee_full_name}<br>
+      <br>
+      Received: {comma-separated list of received doc names, each with ✓}<br>
+      Missing: {comma-separated list of missing docs, or "None"}<br>
+      Source: Email ({now})<br>
+      Case: {issue_identifier}<br>
+      <br>
+      Proceeding to validation.
+  If it fails → add "⚠️ Teams notification failed: {error}" to issue comment and continue.
 ```
 
 ---
@@ -540,6 +573,21 @@ Step 34. Append to audit-log.csv (CSV append pattern):
 Step 35. Update case-tracker Status History:
     → Add row: | {now} | awaiting_resubmission | Resubmission requested — {N} items. |
 
+Step 35a. Teams notification (non-blocking):
+  teams_send_channel_message
+    teamId    = $TEAMS_HR_TEAM_ID
+    channelId = $TEAMS_HR_CHANNEL_ID
+    contentType = "html"
+    content:
+      ⚠️ Documents Incomplete — {employee_full_name}<br>
+      <br>
+      Missing: {comma-separated list of missing documents}<br>
+      Invalid: {comma-separated list of invalid documents, or "None"}<br>
+      Case: {issue_identifier}<br>
+      <br>
+      Follow-up email sent to candidate. Awaiting resubmission.
+  If it fails → add "⚠️ Teams notification failed: {error}" to issue comment and continue.
+
 → IMPORTANT: After Step 35, the routine STOPS and awaits the next candidate reply.
   The heartbeat will detect the candidate's resubmission and re-trigger this routine
   with source="api" + messageId in payload, which enters at PHASE 4 → PHASE 5 → PHASE 6
@@ -601,6 +649,21 @@ Step 40. Create Paperclip approval on current issue:
 
 Step 41. Update case-tracker Status History:
     → Add row: | {now} | awaiting_human_verification | All docs received. Pending human review and SharePoint upload approval. |
+
+Step 41a. Teams notification (non-blocking):
+  teams_send_channel_message
+    teamId    = $TEAMS_HR_TEAM_ID
+    channelId = $TEAMS_HR_CHANNEL_ID
+    contentType = "html"
+    content:
+      ✅ Documents Verified — {employee_full_name}<br>
+      <br>
+      Verified: {verified_count}/{total_mandatory} documents<br>
+      Case: {issue_identifier}<br>
+      Next: Human review approval requested from {human_in_loop_email}<br>
+      <br>
+      All mandatory documents received and validated. Awaiting HR sign-off.
+  If it fails → add "⚠️ Teams notification failed: {error}" to issue comment and continue.
 
 Step 42. Wait for approval.
 ```
@@ -769,6 +832,22 @@ Step 56. Append to audit-log.csv (CSV append pattern):
 
 Step 57. Post final issue comment: "Onboarding case completed for {employee_full_name}. SharePoint folder: HR-Onboarding/{employee_full_name} - {date_of_joining}. Completion email sent to: {recipient_list}. IT setup notification sent to: {IT_SUPPORT_EMAIL}"
 
+Step 57a. Teams notification (non-blocking):
+  teams_send_channel_message
+    teamId    = $TEAMS_HR_TEAM_ID
+    channelId = $TEAMS_HR_CHANNEL_ID
+    contentType = "html"
+    content:
+      ✅ Onboarding Complete — {employee_full_name}<br>
+      <br>
+      Role: {role} ({employee_type})<br>
+      Joining: {date_of_joining}<br>
+      SharePoint: HR-Onboarding/{employee_full_name} - {date_of_joining}/<br>
+      Case: {issue_identifier}<br>
+      <br>
+      All documents verified and archived. Completion email sent to candidate. Case closed.
+  If it fails → add "⚠️ Teams notification failed: {error}" to issue comment and continue.
+
 Step 58. Final case-tracker update:
     → Add row to Status History: | {now} | completed | Onboarding complete. All docs verified, uploaded. Completion email sent to candidate. IT setup notification sent to IT team and HR. |
     → Update header to show: **CASE STATUS: COMPLETED**
@@ -787,6 +866,22 @@ Step 59. Update Paperclip issue → done
 | Document review can't complete | Notify human, set status = awaiting_human_verification |
 | SharePoint upload fails after retries | Set status = escalated, notify human with full error summary |
 | HR manually stops | Set status = cancelled, stop all reminders |
+
+**Teams escalation notification (non-blocking) — send on any scenario above that sets status = escalated or STOP:**
+  teams_send_channel_message
+    teamId    = $TEAMS_HR_TEAM_ID
+    channelId = $TEAMS_HR_CHANNEL_ID
+    contentType = "html"
+    content:
+      🔴 Escalation Required — {employee_full_name}<br>
+      <br>
+      Reason: {reason for escalation}<br>
+      Action: Human review required<br>
+      Notified: {human_in_loop_email}<br>
+      Case: {issue_identifier}<br>
+      <br>
+      Routine paused. Awaiting human resolution.
+  If it fails → add "⚠️ Teams notification failed: {error}" to issue comment and continue.
 
 ---
 
