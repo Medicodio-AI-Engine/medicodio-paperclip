@@ -97,32 +97,40 @@ export function createToolDefinitions(client: TeamsClient): ToolDefinition[] {
     // ── Send channel message ──────────────────────────────────────────────────
     makeTool(
       "teams_send_channel_message",
-      "Send a message to a Teams channel. Returns the created message ID and webUrl.",
+      "Send a message to a Teams channel via the bot. Supports @mentions. Returns the created message ID.",
       z.object({
         teamId: z.string().describe("Team ID"),
         channelId: z.string().describe("Channel ID"),
-        content: z.string().describe("Message body"),
+        content: z.string().describe("Message body. Include <at>DisplayName</at> tags where mentions should appear, or omit and let mentions be auto-prepended."),
         contentType: contentTypeOpt,
         subject: z.string().optional().describe("Optional message subject / card title"),
+        mentions: z.array(z.object({
+          userId: z.string().describe("AAD user object ID to @mention"),
+          displayName: z.string().describe("Display name shown in the @mention tag"),
+        })).optional().describe("Users to @mention in the message"),
       }),
-      async ({ teamId, channelId, content, contentType, subject }) =>
-        client.sendChannelMessage(teamId, channelId, content, contentType, subject),
+      async ({ teamId, channelId, content, contentType, subject, mentions }) =>
+        client.sendChannelMessage(teamId, channelId, content, contentType, subject, mentions),
       client,
     ),
 
     // ── Reply to channel message ───────────────────────────────────────────────
     makeTool(
       "teams_reply_to_message",
-      "Reply to an existing message thread in a Teams channel.",
+      "Reply to an existing message thread in a Teams channel via the bot. Supports @mentions.",
       z.object({
         teamId: z.string().describe("Team ID"),
         channelId: z.string().describe("Channel ID"),
         messageId: z.string().describe("ID of the parent message to reply to"),
         content: z.string().describe("Reply body"),
         contentType: contentTypeOpt,
+        mentions: z.array(z.object({
+          userId: z.string().describe("AAD user object ID to @mention"),
+          displayName: z.string().describe("Display name shown in the @mention tag"),
+        })).optional().describe("Users to @mention in the reply"),
       }),
-      async ({ teamId, channelId, messageId, content, contentType }) =>
-        client.replyToChannelMessage(teamId, channelId, messageId, content, contentType),
+      async ({ teamId, channelId, messageId, content, contentType, mentions }) =>
+        client.replyToChannelMessage(teamId, channelId, messageId, content, contentType, mentions),
       client,
     ),
 
