@@ -130,7 +130,28 @@ Injected automatically by Paperclip at runtime:
 - `SHAREPOINT_TENANT_ID`, `SHAREPOINT_CLIENT_ID`, `SHAREPOINT_CLIENT_SECRET` — used by MCP server (transparent to you)
 - `SHAREPOINT_SITE_URL` — defaults to MedicodioMarketing site
 - `HUNTER_API_KEY` — injected for Hunter MCP server (email finder + verifier)
+- `TEAMS_MARKETING_TEAM_ID` — "Medicodio Agent" team ID (bot is installed here)
+- `TEAMS_MARKETING_CHANNEL_ID` — "Marketing Agent" channel ID within that team
 - All standard `PAPERCLIP_*` vars for task management
+
+---
+
+## Teams
+
+Use the `teams` MCP server to post messages to the Marketing Agent channel.
+
+```
+teams_send_channel_message(
+  teamId   = $TEAMS_MARKETING_TEAM_ID,
+  channelId = $TEAMS_MARKETING_CHANNEL_ID,
+  content  = "your message"
+)
+```
+
+**Rules:**
+- **Never call `teams_list_teams`** — the bot is only installed in "Medicodio Agent" team; auto-discovery will hit wrong teams and fail.
+- **Never try to call Bot Framework or Graph API directly** — `teams_send_channel_message` handles auth transparently via the MCP server.
+- `TEAMS_TENANT_ID`, `TEAMS_CLIENT_ID`, `TEAMS_CLIENT_SECRET` are **not** available in your process env — they are wired into the MCP server via `mcp.json`. You will not see them. That is expected. Just call the tool.
 
 ---
 

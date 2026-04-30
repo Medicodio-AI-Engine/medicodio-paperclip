@@ -26,6 +26,19 @@ HR-Onboarding/
 
 Send notifications to the HR Onboarding channel after key onboarding events using `teams_send_channel_message`.
 
+```
+teams_send_channel_message(
+  teamId    = $TEAMS_HR_TEAM_ID,
+  channelId = $TEAMS_HR_CHANNEL_ID,
+  content   = "your message"
+)
+```
+
+**Rules:**
+- **Never call `teams_list_teams`** — the bot is only installed in "Medicodio Agent" team; auto-discovery will hit wrong teams and fail.
+- **Never try to call Bot Framework or Graph API directly** — the tool handles auth via the MCP server.
+- `TEAMS_TENANT_ID`, `TEAMS_CLIENT_ID`, `TEAMS_CLIENT_SECRET` are **not** in your process env — they are wired into the MCP server via `mcp.json`. You will not see them. That is expected. Just call the tool.
+
 **Channel details — available as environment variables `TEAMS_HR_TEAM_ID` and `TEAMS_HR_CHANNEL_ID`.**
 
 | Event | When to notify |

@@ -241,6 +241,7 @@ export class TeamsClient {
 
     const activity: Record<string, unknown> = {
       type: "message",
+      channelData: { tenant: { id: this.config.tenantId } },
       attachments: [{ contentType: "application/vnd.microsoft.card.adaptive", content: cardBody }],
     };
 
