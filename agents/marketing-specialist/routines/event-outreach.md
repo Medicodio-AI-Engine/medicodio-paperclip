@@ -318,6 +318,21 @@ B5. Post comment:
     "Config loaded. Event: {event_name} | File: {attendee_file} | Batch: {batch_size} | Mode: {send_mode}"
 
     → NEXT: PHASE 1 — Load batch + column map
+
+0d. Teams notification (non-blocking):
+  teams_send_channel_message
+    teamId    = $TEAMS_MARKETING_TEAM_ID
+    channelId = $TEAMS_MARKETING_CHANNEL_ID
+    contentType = "html"
+    content:
+      🟢 Event Outreach Started — {event_name}<br>
+      <br>
+      Event: {event_name} | {event_dates} | {event_location}<br>
+      Attendee file: {attendee_file}<br>
+      Batch size: {batch_size}<br>
+      Send mode: {send_mode}<br>
+      Issue: {PAPERCLIP_TASK_ID}
+  If it fails → add "⚠️ Teams notification failed: {error_message}" to issue comment and continue.
 ```
 
 ---
@@ -587,6 +602,21 @@ Skip this phase entirely if `need_email` list is empty.
     → NEXT: PHASE 3 — Sufficiency check
 ```
 
+**2z. Teams notification (non-blocking) — only if any Hunter lookups were attempted:**
+  teams_send_channel_message
+    teamId    = $TEAMS_MARKETING_TEAM_ID
+    channelId = $TEAMS_MARKETING_CHANNEL_ID
+    contentType = "html"
+    content:
+      🔍 Email Enrichment Complete — {event_name}<br>
+      <br>
+      Found (email_finder): {ef_count} | Found (domain_search): {ds_count}<br>
+      Not found: {nf_count} attendees<br>
+      Deliverable: {del_count} | Risky: {risky_count} | Undeliverable: {undel_count}<br>
+      <br>
+      Proceeding to sufficiency check.
+  If it fails → add "⚠️ Teams notification failed: {error_message}" to issue comment and continue.
+
 ---
 
 ## PHASE 3 — Sufficiency Check
@@ -608,6 +638,21 @@ Skip this phase entirely if `need_email` list is empty.
     → (Do not block entirely — partial send is better than no send)
 
     → NEXT: PHASE 4 — Compose and send / draft emails
+
+3c-notify. Teams notification (non-blocking):
+  teams_send_channel_message
+    teamId    = $TEAMS_MARKETING_TEAM_ID
+    channelId = $TEAMS_MARKETING_CHANNEL_ID
+    contentType = "html"
+    content:
+      ⚠️ Below Email Threshold — {event_name}<br>
+      <br>
+      Found: {sendable_count}/{total_batch} emails ({send_pct}%)<br>
+      Threshold: {min_send_pct}%<br>
+      Action: Sending to {sendable_count} attendees — rest marked email_not_found<br>
+      <br>
+      Partial send proceeding.
+  If it fails → add "⚠️ Teams notification failed: {error_message}" to issue comment and continue.
 ```
 
 ---
@@ -675,6 +720,22 @@ Skip this phase entirely if `need_email` list is empty.
 
     → NEXT: PHASE 5 — Write audit columns back to Excel
 ```
+
+**4z. Teams notification (non-blocking):**
+  teams_send_channel_message
+    teamId    = $TEAMS_MARKETING_TEAM_ID
+    channelId = $TEAMS_MARKETING_CHANNEL_ID
+    contentType = "html"
+    content:
+      📧 Event Outreach Batch — {event_name}<br>
+      <br>
+      Sent: {sent_count} emails<br>
+      Drafted: {drafted_count} (pending review)<br>
+      Skipped: {not_found_count} (no email found)<br>
+      Errors: {error_count}<br>
+      <br>
+      Writing audit columns to Excel now.
+  If it fails → add "⚠️ Teams notification failed: {error_message}" to issue comment and continue.
 
 ---
 
@@ -828,6 +889,21 @@ Skip if `send_mode = "direct"`.
      Sent/Drafted: {sent_count} | Not found: {not_found_count} | Errors: {error_count}
      Run log: Marketing-Specialist/event-outreach/{event_slug}/run-logs/{YYYY-MM-DD}.md"
 
+8b-notify. Teams notification (non-blocking):
+  teams_send_channel_message
+    teamId    = $TEAMS_MARKETING_TEAM_ID
+    channelId = $TEAMS_MARKETING_CHANNEL_ID
+    contentType = "html"
+    content:
+      ✅ Event Outreach Complete — {event_name}<br>
+      <br>
+      Sent: {sent_count} | Drafted: {drafted_count}<br>
+      Enriched: {hunter_found} | Skipped: {not_found_count}<br>
+      Errors: {error_count}<br>
+      Run log: Marketing-Specialist/event-outreach/{event_slug}/run-logs/{YYYY-MM-DD}.md<br>
+      Issue: {PAPERCLIP_TASK_ID}
+  If it fails → add "⚠️ Teams notification failed: {error_message}" to issue comment and continue.
+
 8c. Update issue → done (direct mode) or leave open awaiting approval (draft_review mode)
 
     ✓ PIPELINE COMPLETE.
@@ -850,6 +926,22 @@ Skip if `send_mode = "direct"`.
 | Email send fails | Mark `error` + notes, continue other rows |
 | Excel write fails | Retry once after 3s; block issue if both fail |
 | All rows already processed | Comment "nothing to do", close issue |
+
+**Teams failure notification (non-blocking) — send when any situation above causes a STOP or blocked status:**
+  teams_send_channel_message
+    teamId    = $TEAMS_MARKETING_TEAM_ID
+    channelId = $TEAMS_MARKETING_CHANNEL_ID
+    contentType = "html"
+    content:
+      🔴 Event Outreach — Technical Failure<br>
+      <br>
+      Event: {event_name}<br>
+      Error: {error_message}<br>
+      Phase: {current PHASE name, e.g. "PHASE 2 — Email Enrichment"}<br>
+      Issue: {PAPERCLIP_TASK_ID}<br>
+      <br>
+      Routine stopped or blocked. Check issue for details.
+  If it fails → add "⚠️ Teams notification failed: {error_message}" to issue comment and continue.
 
 ---
 

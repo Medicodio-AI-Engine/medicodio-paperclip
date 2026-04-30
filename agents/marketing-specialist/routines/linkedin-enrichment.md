@@ -500,6 +500,22 @@ o. Progress log every 10 rows:
     Run log saved to SharePoint: `Marketing-Specialist/run-logs/{YYYY-MM-DD}-linkedin-enrichment.md`
     MD
 
+5c-notify. Teams notification (non-blocking):
+  teams_send_channel_message
+    teamId    = $TEAMS_MARKETING_TEAM_ID
+    channelId = $TEAMS_MARKETING_CHANNEL_ID
+    contentType = "html"
+    content:
+      ✅ LinkedIn Enrichment Complete<br>
+      <br>
+      File: {file_path} (sheet: {sheet_name})<br>
+      Processed: {processed} rows<br>
+      LinkedIn URLs found: {enriched}<br>
+      Not found: {not_found} | Skipped: {skipped} | Errors: {api_errors}<br>
+      Run log: Marketing-Specialist/run-logs/{YYYY-MM-DD}-linkedin-enrichment.md<br>
+      Issue: {PAPERCLIP_TASK_ID}
+  If it fails → add "⚠️ Teams notification failed: {error_message}" to issue comment and continue.
+
 5d. PATCH /api/issues/{issueId}
     { "status": "done" }
 ```
@@ -523,6 +539,21 @@ o. Progress log every 10 rows:
 | Low-confidence match (score < 2) | Do not write URL; mark row as `not_found` |
 | Excel write failure | Retry once after 3s; block issue if both fail |
 | All rows already enriched | Post comment "All rows already have LinkedIn URLs. Nothing to do." → mark done |
+
+**Teams failure notification (non-blocking) — send when the routine encounters an unrecoverable error or sets issue → blocked:**
+  teams_send_channel_message
+    teamId    = $TEAMS_MARKETING_TEAM_ID
+    channelId = $TEAMS_MARKETING_CHANNEL_ID
+    contentType = "html"
+    content:
+      🔴 LinkedIn Enrichment — Technical Failure<br>
+      <br>
+      File: {file_path}<br>
+      Error: {error_message}<br>
+      Issue: {PAPERCLIP_TASK_ID}<br>
+      <br>
+      Routine stopped. Check issue for details.
+  If it fails → add "⚠️ Teams notification failed: {error_message}" to issue comment and continue.
 
 ---
 

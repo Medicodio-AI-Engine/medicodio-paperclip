@@ -141,6 +141,21 @@ Search Excel for rows where `paperclip_status = "sent"` and `Email` matches the 
        update issue → done, STOP
 ```
 
+4a. Teams notification (non-blocking):
+  teams_send_channel_message
+    teamId    = $TEAMS_MARKETING_TEAM_ID
+    channelId = $TEAMS_MARKETING_CHANNEL_ID
+    contentType = "html"
+    content:
+      🟢 Daily Lead Outreach — Run Started<br>
+      <br>
+      Processing: {batch_size} leads from Apollo export<br>
+      File: {apollo_file}<br>
+      Mailbox: {outlook_user}<br>
+      <br>
+      Searching context for each lead now.
+  If it fails → add "⚠️ Teams notification failed: {error_message}" to issue comment and continue.
+
 ### PHASE 3 — Research each lead
 
 **REQUIRED: Invoke the `web-research` skill before starting any research.** Do not free-form search. The skill defines the exact tool sequence, fallback order, and cross-verification rules.
@@ -234,6 +249,21 @@ For each researched lead:
     → update this row: paperclip_status="draft_created", paperclip_draft_id="{draftId}", paperclip_processed_at="{now ISO}"
 ```
 
+14a. Teams notification (non-blocking):
+  teams_send_channel_message
+    teamId    = $TEAMS_MARKETING_TEAM_ID
+    channelId = $TEAMS_MARKETING_CHANNEL_ID
+    contentType = "html"
+    content:
+      📧 Drafts Ready for Review — Daily Lead Outreach<br>
+      <br>
+      Drafts: {N} created in Outlook Drafts<br>
+      Leads: {lead_name_1} ({company_1}), {lead_name_2} ({company_2}), ...<br>
+      Review at: {outlook_user}<br>
+      <br>
+      Approval requested. Run paused until response.
+  If it fails → add "⚠️ Teams notification failed: {error_message}" to issue comment and continue.
+
 ### PHASE 5 — Notify reviewer
 
 ```
@@ -301,6 +331,21 @@ When Karthik approves the Paperclip approval:
     → subject: "[Medicodio Outreach] {N} emails sent successfully — {date}"
     → body: "All approved drafts have been sent. Summary: {names + companies}"
 
+20a. Teams notification (non-blocking):
+  teams_send_channel_message
+    teamId    = $TEAMS_MARKETING_TEAM_ID
+    channelId = $TEAMS_MARKETING_CHANNEL_ID
+    contentType = "html"
+    content:
+      ✅ Emails Sent — Daily Lead Outreach<br>
+      <br>
+      Sent: {N} emails<br>
+      To: {lead_name_1} ({company_1}), {lead_name_2} ({company_2}), ...<br>
+      Mailbox: {outlook_user}<br>
+      <br>
+      Excel rows updated. Run complete.
+  If it fails → add "⚠️ Teams notification failed: {error_message}" to issue comment and continue.
+
 21. Post final comment on issue:
     "All {N} emails sent. Rows updated in Apollo sheet. Closing issue."
 
@@ -335,6 +380,20 @@ When Karthik approves the Paperclip approval:
 | Web search returns nothing | Draft email without company detail, note in draft body |
 | Outlook draft creation fails | Set `paperclip_status="error"`, note error, continue other rows |
 | Send fails on approval | Mark that row `send_failed`, send others, report in comment |
+
+**Teams failure notification (non-blocking) — send when the routine sets issue → blocked or encounters an unrecoverable error:**
+  teams_send_channel_message
+    teamId    = $TEAMS_MARKETING_TEAM_ID
+    channelId = $TEAMS_MARKETING_CHANNEL_ID
+    contentType = "html"
+    content:
+      🔴 Daily Lead Outreach — Technical Failure<br>
+      <br>
+      Error: {error_message}<br>
+      Issue: {PAPERCLIP_TASK_ID}<br>
+      <br>
+      Routine stopped or blocked. Check issue for details.
+  If it fails → add "⚠️ Teams notification failed: {error_message}" to issue comment and continue.
 
 ---
 
