@@ -7,6 +7,12 @@ interface TokenCache {
   expiresAt: number;
 }
 
+export interface MentionEntity {
+  /** AAD user object ID */
+  userId: string;
+  displayName: string;
+}
+
 export interface TeamsTeam {
   id: string;
   displayName: string;
@@ -73,6 +79,7 @@ export class TeamsApiError extends Error {
 
 export class TeamsClient {
   private tokenCache: TokenCache | null = null;
+  private botTokenCache: TokenCache | null = null;
 
   constructor(private readonly config: TeamsMcpConfig) {}
 
@@ -103,6 +110,31 @@ export class TeamsClient {
     return data.access_token;
   }
 
+  private async getBotFrameworkToken(): Promise<string> {
+    const now = Date.now();
+    if (this.botTokenCache && this.botTokenCache.expiresAt > now + 60_000) {
+      return this.botTokenCache.accessToken;
+    }
+    const url = `https://login.microsoftonline.com/${this.config.tenantId}/oauth2/v2.0/token`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: this.config.clientId,
+        client_secret: this.config.clientSecret,
+        scope: "https://api.botframework.com/.default",
+      }).toString(),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Bot Framework token fetch failed ${res.status}: ${text}`);
+    }
+    const data = (await res.json()) as { access_token: string; expires_in: number };
+    this.botTokenCache = { accessToken: data.access_token, expiresAt: now + 55 * 60 * 1000 };
+    return data.access_token;
+  }
+
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const token = await this.getAccessToken();
     const url = path.startsWith("https://") ? path : `${GRAPH_BASE}${path}`;
@@ -123,6 +155,26 @@ export class TeamsClient {
     }
 
     if (res.status === 204) return undefined as T;
+    return res.json() as Promise<T>;
+  }
+
+  private async botRequest<T>(conversationId: string, activity: unknown): Promise<T> {
+    const token = await this.getBotFrameworkToken();
+    const serviceUrl = this.config.botServiceUrl ?? "https://smba.trafficmanager.net/apis/";
+    const url = `${serviceUrl}v3/conversations/${conversationId}/activities`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(activity),
+    });
+    if (!res.ok) {
+      let errBody: unknown;
+      try { errBody = await res.json(); } catch { errBody = await res.text(); }
+      throw new TeamsApiError(res.status, "POST", url, errBody);
+    }
     return res.json() as Promise<T>;
   }
 
@@ -158,21 +210,55 @@ export class TeamsClient {
     return data.value;
   }
 
+  private buildChannelActivity(
+    content: string,
+    subject?: string,
+    mentions?: MentionEntity[],
+  ): Record<string, unknown> {
+    let text = content;
+
+    if (mentions && mentions.length > 0 && !text.includes("<at>")) {
+      const tags = mentions.map((m) => `<at>${m.displayName}</at>`).join(" ");
+      text = `${tags} ${text}`;
+    }
+
+    const cardBody: Record<string, unknown> = {
+      $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
+      type: "AdaptiveCard",
+      version: "1.0",
+      body: [{ type: "TextBlock", text, wrap: true }],
+    };
+
+    if (mentions && mentions.length > 0) {
+      cardBody.msteams = {
+        entities: mentions.map((m) => ({
+          type: "mention",
+          text: `<at>${m.displayName}</at>`,
+          mentioned: { id: m.userId, name: m.displayName },
+        })),
+      };
+    }
+
+    const activity: Record<string, unknown> = {
+      type: "message",
+      attachments: [{ contentType: "application/vnd.microsoft.card.adaptive", content: cardBody }],
+    };
+
+    if (subject) activity.summary = subject;
+    return activity;
+  }
+
   async sendChannelMessage(
     teamId: string,
     channelId: string,
     content: string,
-    contentType: "text" | "html" = "text",
+    _contentType: "text" | "html" = "text",
     subject?: string,
+    mentions?: MentionEntity[],
   ): Promise<SendMessageResult> {
-    const body: Record<string, unknown> = {
-      body: { contentType, content },
-    };
-    if (subject) body.subject = subject;
-    return this.request<SendMessageResult>(
-      "POST",
-      `/teams/${teamId}/channels/${channelId}/messages`,
-      body,
+    return this.botRequest<SendMessageResult>(
+      channelId,
+      this.buildChannelActivity(content, subject, mentions),
     );
   }
 
@@ -181,13 +267,23 @@ export class TeamsClient {
     channelId: string,
     messageId: string,
     content: string,
-    contentType: "text" | "html" = "text",
+    _contentType: "text" | "html" = "text",
+    mentions?: MentionEntity[],
   ): Promise<SendMessageResult> {
-    return this.request<SendMessageResult>(
-      "POST",
-      `/teams/${teamId}/channels/${channelId}/messages/${messageId}/replies`,
-      { body: { contentType, content } },
-    );
+    const token = await this.getBotFrameworkToken();
+    const serviceUrl = this.config.botServiceUrl ?? "https://smba.trafficmanager.net/apis/";
+    const url = `${serviceUrl}v3/conversations/${channelId}/activities/${messageId}`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(this.buildChannelActivity(content, undefined, mentions)),
+    });
+    if (!res.ok) {
+      let errBody: unknown;
+      try { errBody = await res.json(); } catch { errBody = await res.text(); }
+      throw new TeamsApiError(res.status, "POST", url, errBody);
+    }
+    return res.json() as Promise<SendMessageResult>;
   }
 
   async listMessageReplies(
