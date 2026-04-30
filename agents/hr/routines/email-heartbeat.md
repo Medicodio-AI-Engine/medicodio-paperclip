@@ -310,6 +310,23 @@ For each active case:
 | Nudge email send fails | `outlook_send_email` to `human_in_loop_email`, append failure row to audit-log, do NOT mark nudge as sent |
 | Onboarding routine trigger fails on reply detected | `outlook_send_email` to `human_in_loop_email` with `messageId` for manual handling, append failure row to audit-log |
 
+**Teams failure notification (non-blocking) — send on any failure that causes STOP or prevents a case from advancing:**
+  teams_send_channel_message
+    teamId    = $TEAMS_HR_TEAM_ID
+    channelId = $TEAMS_HR_CHANNEL_ID
+    contentType = "html"
+    content:
+      🔴 HR Email Heartbeat — Technical Failure<br>
+      <br>
+      Error: {error_message}<br>
+      Step: {current_step_label} (e.g. "STEP 2 — Process replies")<br>
+      Active cases at time of failure: {active_case_count}<br>
+      <br>
+      Heartbeat stopped. Human intervention may be required.
+  If it fails → add "⚠️ Teams notification failed: {error_message}" to issue comment and continue.
+
+**Do NOT send a Teams notification on quiet runs** (inbox checked, no replies found, no nudges sent). Only notify on failures.
+
 ---
 
 ## Data sensitivity

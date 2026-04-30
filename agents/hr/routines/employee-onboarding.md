@@ -355,7 +355,7 @@ Step 17a. Teams notification (non-blocking):
       Joining: {date_of_joining}<br>
       Email: {employee_email}<br>
       HR Contact: {recruiter_or_hr_name}<br>
-      Case: {issue_identifier}<br>
+      Case: {PAPERCLIP_TASK_ID}<br>
       <br>
       Document request email sent. Awaiting candidate submission.
   If it fails → add "⚠️ Teams notification failed: {error}" to issue comment and continue.
@@ -447,7 +447,7 @@ Step 25a. Teams notification (non-blocking):
       Received: {comma-separated list of received doc names, each with ✓}<br>
       Missing: {comma-separated list of missing docs, or "None"}<br>
       Source: Email ({now})<br>
-      Case: {issue_identifier}<br>
+      Case: {PAPERCLIP_TASK_ID}<br>
       <br>
       Proceeding to validation.
   If it fails → add "⚠️ Teams notification failed: {error}" to issue comment and continue.
@@ -581,9 +581,9 @@ Step 35a. Teams notification (non-blocking):
     content:
       ⚠️ Documents Incomplete — {employee_full_name}<br>
       <br>
-      Missing: {comma-separated list of missing documents}<br>
+      Missing: {comma-separated list of missing documents, or "None"}<br>
       Invalid: {comma-separated list of invalid documents, or "None"}<br>
-      Case: {issue_identifier}<br>
+      Case: {PAPERCLIP_TASK_ID}<br>
       <br>
       Follow-up email sent to candidate. Awaiting resubmission.
   If it fails → add "⚠️ Teams notification failed: {error}" to issue comment and continue.
@@ -658,8 +658,8 @@ Step 41a. Teams notification (non-blocking):
     content:
       ✅ Documents Verified — {employee_full_name}<br>
       <br>
-      Verified: {verified_count}/{total_mandatory} documents<br>
-      Case: {issue_identifier}<br>
+      Verified: {N}/{total} documents<br>
+      Case: {PAPERCLIP_TASK_ID}<br>
       Next: Human review approval requested from {human_in_loop_email}<br>
       <br>
       All mandatory documents received and validated. Awaiting HR sign-off.
@@ -843,7 +843,7 @@ Step 57a. Teams notification (non-blocking):
       Role: {role} ({employee_type})<br>
       Joining: {date_of_joining}<br>
       SharePoint: HR-Onboarding/{employee_full_name} - {date_of_joining}/<br>
-      Case: {issue_identifier}<br>
+      Case: {PAPERCLIP_TASK_ID}<br>
       <br>
       All documents verified and archived. Completion email sent to candidate. Case closed.
   If it fails → add "⚠️ Teams notification failed: {error}" to issue comment and continue.
@@ -875,10 +875,10 @@ Step 59. Update Paperclip issue → done
     content:
       🔴 Escalation Required — {employee_full_name}<br>
       <br>
-      Reason: {reason for escalation}<br>
+      Reason: {escalation_reason}<br>
       Action: Human review required<br>
       Notified: {human_in_loop_email}<br>
-      Case: {issue_identifier}<br>
+      Case: {PAPERCLIP_TASK_ID}<br>
       <br>
       Routine paused. Awaiting human resolution.
   If it fails → add "⚠️ Teams notification failed: {error}" to issue comment and continue.
