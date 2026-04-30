@@ -12,6 +12,40 @@ Generic, reusable conference/event outreach module. All event-specific data live
 
 ---
 
+## MANDATORY EXECUTION ORDER
+
+**Every run MUST execute ALL phases below in sequence. Never stop between phases.**
+Early exit is ONLY permitted at an explicit STOP instruction listed under STOP CONDITIONS.
+
+| Step | Phase | Skip condition |
+|------|-------|----------------|
+| 1 | PRE-CHECK A — Delivery status (bounces) | None — always run |
+| 2 | PRE-CHECK B — Reply detection | None — always run |
+| 3 | PHASE 0 — Read config | None — always run |
+| 4 | PHASE 1 — Load batch + column map | None — always run |
+| 5 | PHASE 2 — Hunter email enrichment | Skip only if `need_email` list is empty |
+| 6 | PHASE 3 — Sufficiency check | None — always run |
+| 7 | PHASE 4 — Compose and send / draft emails | None — always run |
+| 8 | PHASE 5 — Write audit columns back to Excel | None — always run |
+| 9 | PHASE 6 — Notify reviewer | Skip only if `send_mode = direct` |
+| 10 | PHASE 7 — On approval / rejection | Skip only if `send_mode = direct` |
+| 11 | PHASE 8 — Run log and summary | None — always run |
+
+## STOP CONDITIONS
+
+Early exit is ONLY permitted when one of these explicit conditions is met:
+
+- `event_slug` missing from issue description → post blocked comment, STOP
+- `config.md` not found in SharePoint → post blocked comment, STOP
+- Required config keys missing → post blocked comment listing missing keys, STOP
+- `pc_status` column mapping error detected → post blocked comment, STOP
+- Zero eligible rows found → post "Nothing to do" comment, close issue, STOP
+- Unrecoverable SharePoint write error → escalate, STOP
+
+**Everything else → continue immediately to the next phase.**
+
+---
+
 ## Global Conventions
 
 - **Timestamps:** ISO-8601 UTC — `YYYY-MM-DDTHH:MM:SSZ`
@@ -19,7 +53,12 @@ Generic, reusable conference/event outreach module. All event-specific data live
 - **Config file:** `Marketing-Specialist/event-outreach/{event_slug}/config.md` (read on every run — always fresh)
 - **HTML emails:** All emails MUST use `bodyType: "HTML"` or `isHtml: true`. Never plain text.
 - **Audit columns:** Written back to the same Excel file. Never modify input data columns.
-- **Excel reads — NEVER read the full sheet.** Always use a column-range address (e.g. `BW:CF`). Read header row (`A1:ZZ1`) first to find column letters, then read only the needed columns. Full-sheet reads cause token overflow on large files.
+- **Excel reads — NEVER read unbounded ranges.** Rules in order:
+  1. Read header row (`A1:ZZ1`) first to find column letters.
+  2. Determine `last_row` by reading a single column with a ceiling: `{col}1:{col}2000`, count non-empty cells.
+  3. Always use row-bounded addresses: `{start_col}1:{end_col}{last_row}`. NEVER use `BV:CK`-style unbounded column ranges.
+  4. Read at most 3–4 adjacent columns per call. Non-adjacent columns → separate single-column reads.
+  5. Full-sheet reads and wide unbounded ranges cause token overflow on large files.
 - **Hunter API key:** Read from env var `HUNTER_API_KEY` — never hardcode.
 - **Idempotency:** Row is skipped if ANY of these are true:
   - `pc_status` = `sent` / `draft_created` / `skipped` (this event's audit columns), OR
@@ -72,6 +111,8 @@ The agent does NOT assume column names. On first run it reads all headers, infer
 # Column Map — {event_slug}
 # Auto-generated on first run. Edit manually only if headers change.
 # Format: canonical_field: exact_header_as_it_appears_in_excel | column_index
+# IMPORTANT: column_index is 0-BASED. A=0, B=1, C=2, ... Z=25, AA=26, AB=27, ...
+# Conversion formula: index < 26 → single letter (A+index); index >= 26 → two letters (AA=26, AB=27, ...)
 
 first_name:  First Name   | 0
 last_name:   Last Name    | 1
@@ -127,7 +168,8 @@ Run this before anything else. Updates Excel with bounce data from prior sends.
 A1. Read event_slug from issue description (same as Phase 0 — needed for file paths).
     If missing, skip pre-checks and go straight to Phase 0.
 
-A2. Read ONLY audit columns — never read the full sheet (full read = token overflow):
+A2. Read ONLY audit columns — never read the full sheet (full read = token overflow).
+    ALWAYS use row-bounded ranges. NEVER use unbounded column addresses like "BV:CK".
 
     STEP 1: Read header row only to find audit column letters:
     sharepoint_excel_read_range
@@ -135,13 +177,24 @@ A2. Read ONLY audit columns — never read the full sheet (full read = token ove
     → find index of: pc_status, pc_event, pc_email_used, pc_sent_at, pc_delivery_status, pc_delivery_notes
     → convert index to Excel column letter (A=0, B=1, ... Z=25, AA=26, ...)
 
-    STEP 2: Read ONLY those audit columns for all data rows:
+    STEP 2: Determine last data row — read pc_status column only with a ceiling:
     sharepoint_excel_read_range
-    → address: "{pc_status_col}:{pc_delivery_notes_col}"   ← audit columns only, no limit on rows
+    → address: "{pc_status_col}1:{pc_status_col}2000"   ← single column, capped at 2000
+    → count non-empty cells (excluding header) → last_row
 
-    Identify rows where ALL of:
-    → pc_status = "sent" AND pc_event = {event_slug}
-    → pc_delivery_status is empty (not yet checked)
+    If last_row = 0: skip to PRE-CHECK B (no data rows).
+
+    STEP 3: Read pc_status + pc_event only to find candidate rows:
+    sharepoint_excel_read_range
+    → address: "{pc_status_col}1:{pc_event_col}{last_row}"   ← 2 columns, row-bounded
+    → collect row numbers where pc_status = "sent" AND pc_event = {event_slug}
+
+    If none: skip to PRE-CHECK B.
+
+    STEP 4: Read delivery columns only for candidate rows — 3 columns max, row-bounded:
+    sharepoint_excel_read_range
+    → address: "{pc_email_used_col}1:{pc_delivery_notes_col}{last_row}"   ← 3 columns, row-bounded
+    → filter to candidate rows where pc_delivery_status is empty (not yet checked)
 
     Check every sent row regardless of when it was sent — no 24hr restriction.
     If none: skip to PRE-CHECK B.
@@ -166,6 +219,8 @@ A4. sharepoint_excel_write_range → write pc_delivery_status + pc_delivery_note
 
 A5. Post comment:
     "PRE-CHECK A: {delivered_count} delivered, {bounced_count} bounced, {skipped_count} skipped (< 24hrs or already checked)."
+
+    → NEXT: Proceed immediately to PRE-CHECK B. Do not stop.
 ```
 
 ---
@@ -173,9 +228,18 @@ A5. Post comment:
 ## PRE-CHECK B — Reply Detection (scan inbox for replies)
 
 ```
-B1. Read ONLY pc_email_used + pc_reply_received columns (never full sheet):
+B1. Read ONLY pc_email_used + pc_reply_received columns (never full sheet).
+    ALWAYS use row-bounded ranges. NEVER use unbounded column addresses.
+
+    NOTE: last_row here is from pc_status column (only processed rows) — that is correct for
+    PRE-CHECK B since we only scan emails that were actually sent.
+    Reuse last_row from PRE-CHECK A if available; otherwise re-read:
     sharepoint_excel_read_range
-    → address: "{pc_email_used_col}:{pc_reply_snippet_col}"   ← reply audit columns only
+    → address: "{pc_status_col}1:{pc_status_col}2000"   ← single column, capped at 2000
+    → count non-empty cells (excluding header) → last_row
+
+    sharepoint_excel_read_range
+    → address: "{pc_email_used_col}1:{pc_reply_received_col}{last_row}"   ← 2 columns, row-bounded
     → collect all pc_email_used values where pc_reply_received is empty
 
     Then scan Outlook inbox:
@@ -220,6 +284,11 @@ B5. Post comment:
 
     Add 3 new audit columns if not already present:
     pc_reply_received | pc_reply_intent | pc_reply_snippet
+
+    MANDATORY: PRE-CHECKS are now complete. Proceed immediately to PHASE 0.
+    Posting this comment is NOT task completion — the outreach pipeline has not started yet.
+    PRE-CHECKs are audit-only maintenance steps. PHASE 0 through PHASE 8 MUST run next.
+    → NEXT: PHASE 0 — Read config
 ```
 
 ---
@@ -247,6 +316,8 @@ B5. Post comment:
 
 0c. Post issue comment:
     "Config loaded. Event: {event_name} | File: {attendee_file} | Batch: {batch_size} | Mode: {send_mode}"
+
+    → NEXT: PHASE 1 — Load batch + column map
 ```
 
 ---
@@ -264,11 +335,41 @@ B5. Post comment:
     → identify column letters for: first_name, last_name, email, company, domain, title,
       prior_delivery_status, pc_status, pc_event, pc_email_used, pc_draft_id, and all audit columns
 
-    Then read ONLY the columns needed for batch selection (never the full sheet):
+    Determine last data row — MUST re-read from first_name column NOW:
+    WARNING: Do NOT reuse last_row from PRE-CHECKs. PRE-CHECK last_row was determined from
+    pc_status column which is only populated for already-processed rows. That number is much
+    smaller than the true attendee count. You MUST re-determine last_row here from first_name_col.
+
     sharepoint_excel_read_range
-    → address: "{email_col},{company_col},{first_name_col},{last_name_col},{pc_status_col},{pc_event_col},{prior_delivery_status_col}"
-    → This reads only the columns needed for idempotency + batch selection
-    → Top 10 rows sufficient to validate structure; then read all rows of these columns only
+    → address: "{first_name_col}1:{first_name_col}2000"   ← first_name column, capped at 2000
+    → count non-empty cells (excluding header) → last_row  ← THIS replaces any prior last_row value
+
+    IMPORTANT — what to expect: The attendee file typically contains hundreds of rows.
+    Most rows will have an EMPTY pc_status — those are the unprocessed attendees waiting to be emailed.
+    A small number of rows near the top will have pc_status set (already processed in prior runs).
+    Empty pc_status = NOT a problem. Empty pc_status = the rows you MUST process next.
+    Do NOT stop because most rows have empty pc_status. That is expected and correct.
+
+    Then read ONLY the columns needed for batch selection in narrow slices (never wide ranges):
+    NEVER use comma-separated column addresses or unbounded ranges.
+
+    Slice 1 — idempotency columns (3 cols max, row-bounded):
+    sharepoint_excel_read_range
+    → address: "{pc_status_col}1:{pc_event_col}{last_row}"
+    → captures: pc_status, pc_event (adjacent columns assumed — reorder if not adjacent, see below)
+
+    Slice 2 — prior delivery + email columns (3 cols max, row-bounded):
+    sharepoint_excel_read_range
+    → address: "{prior_delivery_status_col}1:{email_col}{last_row}"
+    → captures: prior_delivery_status, email (adjacent columns assumed)
+
+    Slice 3 — name + company columns (3 cols max, row-bounded):
+    sharepoint_excel_read_range
+    → address: "{first_name_col}1:{company_col}{last_row}"
+    → captures: first_name, last_name, company (adjacent columns assumed)
+
+    NOTE: If any two needed columns are non-adjacent, read each as a separate single-column range
+    rather than a wide range that spans unneeded columns.
 
 1c. Resolve column map — PARSE ONCE, CACHE FOREVER per event:
 
@@ -308,26 +409,70 @@ B5. Post comment:
         # Column Map — {event_slug}
         # Auto-generated {now ISO}. Edit manually only if Excel headers change.
         # Format: canonical_field: exact_header | column_index   (-1 = not found)
+        # IMPORTANT: column_index is 0-BASED (A=0, B=1, C=2, ... Z=25, AA=26, AB=27, ...)
 
-        first_name:  {matched_header}  | {index}
-        last_name:   {matched_header}  | {index}
-        email:       {matched_header}  | {index or -1}
-        company:     {matched_header}  | {index}
-        domain:      {matched_header}  | {index or -1}
-        title:       {matched_header}  | {index or -1}
+        first_name:             {matched_header}  | {index}
+        last_name:              {matched_header}  | {index}
+        email:                  {matched_header}  | {index or -1}
+        company:                {matched_header}  | {index}
+        domain:                 {matched_header}  | {index or -1}
+        title:                  {matched_header}  | {index or -1}
+        prior_delivery_status:  {matched_header}  | {index or -1}
+        pc_status:              pc_status         | {index}
+        pc_email_source:        pc_email_source   | {index}
+        pc_email_used:          pc_email_used     | {index}
+        pc_sent_at:             pc_sent_at        | {index}
+        pc_event:               pc_event          | {index}
+        pc_draft_id:            pc_draft_id       | {index}
+        pc_delivery_status:     pc_delivery_status| {index or -1}
+        pc_delivery_notes:      pc_delivery_notes | {index or -1}
+        pc_reply_received:      pc_reply_received | {index or -1}
+        pc_reply_intent:        pc_reply_intent   | {index or -1}
+        pc_reply_snippet:       pc_reply_snippet  | {index or -1}
         ---
 
         → Post comment: "First run: column map inferred and cached at Marketing-Specialist/event-outreach/{event_slug}/column-map.md. Review it if any mapping looks wrong."
         → Log each mapping: "first_name → '{header}' (col {index})"
 
-1d. Find next {batch_size} eligible rows:
-    A row is SKIPPED (not eligible) if ANY of:
-    → pc_status = "sent" | "draft_created" | "skipped"        (processed this run)
-    → pc_event = {event_slug}                                  (already processed for this event)
-    → email_delivery_status = "sent"                           (sent by prior system — NEVER re-send)
+1d. SANITY CHECK pc_status column before proceeding:
+    After reading the pc_status slice (Step 3 of 1b):
+    → Count rows with any non-empty pc_status value → known_processed_count
+    → Count rows with pc_email_used non-empty (read {pc_email_used_col}1:{pc_email_used_col}{last_row}) → email_written_count
 
-    A row IS eligible if:
-    → pc_status is empty/missing AND pc_event != {event_slug} AND prior_delivery_status != "sent"
+    IF known_processed_count = 0 AND email_written_count > 0:
+    → The pc_status column letter is WRONG — agent read the wrong column, saw all-empty, but emails
+      have been sent (pc_email_used has data). This is a column mapping error.
+    → Post BLOCKED comment:
+      "HALT: pc_status column appears empty but pc_email_used has {email_written_count} values.
+       Column mapping is likely wrong. Check column-map.md and verify pc_status column letter.
+       Do NOT proceed — risk of re-sending to already-processed rows."
+    → STOP
+
+1e. Find next {batch_size} eligible rows:
+
+    CORE PRINCIPLE: Rows with EMPTY pc_status are the target. The whole point of this phase
+    is to find those rows and process them. A large number of empty pc_status rows is normal —
+    it means there are many attendees still waiting to be contacted. Pick the first {batch_size}
+    of them and proceed. Do NOT interpret many empty rows as an error or as "nothing to do."
+
+    PRIMARY rule — a row is SKIPPED if pc_status is non-empty (any value):
+    → pc_status = "sent"           → SKIP (emailed this event)
+    → pc_status = "draft_created"  → SKIP (drafted, awaiting approval)
+    → pc_status = "skipped"        → SKIP (intentionally skipped)
+    → pc_status = "email_not_found"→ SKIP (no email found, cannot send)
+    → pc_status = "error"          → SKIP (failed — do not retry automatically)
+    → pc_status = "pending"        → eligible (was staged but not yet sent)
+
+    SECONDARY rule — also skip if:
+    → prior_delivery_status = "sent"  (sent by prior system — NEVER re-send, write NOTHING to pc_* columns)
+
+    A row IS eligible if AND ONLY if:
+    → pc_status is EMPTY/MISSING (not set to any value above)  ← this is the common case
+    → AND prior_delivery_status != "sent"
+
+    NOTE: pc_event alone is NOT a skip condition. A row where pc_event is set but pc_status
+    is empty was partially written (Hunter ran but send failed) — treat it as eligible and
+    re-attempt. The pc_event value will be overwritten on re-process.
 
     IMPORTANT: When skipping a row due to prior_delivery_status = "sent", write NOTHING to any pc_* column.
     Do not overwrite, do not set pc_status = "sent". Leave it completely untouched.
@@ -342,6 +487,8 @@ B5. Post comment:
 
     Post comment:
     "Batch loaded: {batch_size} rows | Has email: {count} | Missing email: {count}"
+
+    → NEXT: PHASE 2 — Hunter email enrichment (skip phase if need_email is empty, go straight to PHASE 3)
 ```
 
 ---
@@ -436,6 +583,8 @@ Skip this phase entirely if `need_email` list is empty.
      Found (email_finder): {ef_count} | Found (domain_search): {ds_count}
      Deliverable: {del_count} | Risky: {risky_count} | Undeliverable: {undel_count} | Not found: {nf_count}
      Search credits remaining: ~{search_credits_remaining - credits_used}"
+
+    → NEXT: PHASE 3 — Sufficiency check
 ```
 
 ---
@@ -457,6 +606,8 @@ Skip this phase entirely if `need_email` list is empty.
        Threshold is {min_send_pct}%. Sending what we have and marking rest as email_not_found."
     → Proceed anyway — send to all rows that DO have an email, skip the rest
     → (Do not block entirely — partial send is better than no send)
+
+    → NEXT: PHASE 4 — Compose and send / draft emails
 ```
 
 ---
@@ -521,6 +672,8 @@ Skip this phase entirely if `need_email` list is empty.
 
 4d. Post progress comment every 10 rows:
     "Progress: {sent}/{sendable_count} emails {send_mode == direct ? "sent" : "drafted"}."
+
+    → NEXT: PHASE 5 — Write audit columns back to Excel
 ```
 
 ---
@@ -548,6 +701,8 @@ Skip this phase entirely if `need_email` list is empty.
     sharepoint_excel_read_range → spot-check 3 random rows
     → Confirm pc_status values persisted
     → Log: "Excel audit write verified."
+
+    → NEXT: PHASE 6 — Notify reviewer (skip to PHASE 8 if send_mode = direct)
 ```
 
 ---
@@ -580,6 +735,8 @@ Skip if `send_mode = "direct"`.
 
 6d. Post comment:
     "{N} drafts created. Approval requested. Awaiting review before sending."
+
+    → NEXT: PHASE 7 — Await approval / rejection (issue stays open until decision received)
 ```
 
 ---
@@ -612,6 +769,8 @@ Skip if `send_mode = "direct"`.
     "All {N} emails sent for {event_name}. Excel updated."
 
 7f. Update issue → done
+
+    → NEXT: PHASE 8 — Run log and summary
 ```
 
 ## On Rejection (draft_review mode only)
@@ -670,6 +829,8 @@ Skip if `send_mode = "direct"`.
      Run log: Marketing-Specialist/event-outreach/{event_slug}/run-logs/{YYYY-MM-DD}.md"
 
 8c. Update issue → done (direct mode) or leave open awaiting approval (draft_review mode)
+
+    ✓ PIPELINE COMPLETE.
 ```
 
 ---
