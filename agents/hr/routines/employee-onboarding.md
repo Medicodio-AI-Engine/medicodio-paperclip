@@ -14,6 +14,9 @@
 - **Government ID masking:** Never output, log, or include in any email the digits of Aadhaar, PAN, or any government ID. Use placeholders only: "Aadhaar received ✓", "PAN card on file". Use `[REDACTED]` if you must reference a specific ID in an exception note.
 - **HTML emails:** All emails sent by this routine MUST use `isHtml: true`. Never send plain text.
 - **Binary file uploads (CRITICAL):** When uploading PDFs, images, or any non-text file from Outlook to SharePoint, ALWAYS use `sharepoint_transfer_from_outlook` — one call with messageId + attachmentId + destPath. It streams bytes server-side; binary never enters the context window. NEVER use `outlook_read_attachment` + `sharepoint_upload_binary` for files — base64 gets truncated for anything over ~75 KB.
+- **`outlook_read_attachment` — two completely different contexts, opposite rules:**
+  - ✅ **Phase 5 validation — MANDATORY:** Call `outlook_read_attachment` on EVERY image and PDF before running any check. This is the only way Claude can visually inspect document content. Skipping this call = the document was never validated. Filename and size alone are NOT validation.
+  - ❌ **Phase 9 upload — NEVER:** Do not use `outlook_read_attachment` for uploading to SharePoint. Use `sharepoint_transfer_from_outlook` instead. The NEVER rule above applies exclusively to Phase 9 uploads — it does NOT apply to Phase 5 validation.
 
 ---
 
@@ -149,6 +152,15 @@ IF source == "manual" OR (source == "api" AND messageId is absent or empty):
 
 ```
 Step 2. Parse all required fields from payload.
+
+Step 2a. If phone_number is missing or empty:
+   → outlook_send_email to employee_email
+     subject: "Quick Detail Required – Onboarding for {employee_full_name}"
+     isHtml: true
+     body: <p>Hi {employee_full_name},</p><p>We are initiating your onboarding process. Could you please share your contact phone number at the earliest so we can update our records?</p><p>Please reply to this email with your phone number.</p><p>Regards,<br>{recruiter_or_hr_name}</p>
+   → Set phone_number = "pending — requested via email"
+   → Post issue comment: "phone_number missing — email sent to {employee_email} requesting it. Proceeding with onboarding."
+   → Continue to Step 3 (do NOT stop)
 
 Step 3. If employee_type not in allowed list (intern, fresher, fte, experienced, contractor, rehire):
    → outlook_send_email to human_in_loop_email
@@ -381,10 +393,17 @@ This routine does **not** poll for replies directly — it resumes when the hear
 ```
 Step 18. Set status = awaiting_document_submission (if not already set)
 
-Step 19. Append to audit-log.csv (CSV append pattern):
-    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|awaiting_document_submission|awaiting_reply|Routine paused — heartbeat polling active|Nudge cadence: 24h/48h/stalled at 72h
+Step 18a. Update Paperclip issue status to "in_review":
+    PATCH /api/issues/{PAPERCLIP_TASK_ID}
+    body: { "status": "in_review" }
+    → This signals to the platform that the issue is waiting on an external party (candidate),
+      not actively being worked. Prevents unnecessary liveness wakeups while awaiting reply.
+    → On failure: log warning in issue comment and continue — non-blocking.
 
-Step 20. Post issue comment: "Waiting for candidate reply. Heartbeat polling active (every 30 min). Nudge cadence: Nudge 1 at 24h, Nudge 2 at 48h, stalled at 72h."
+Step 19. Append to audit-log.csv (CSV append pattern):
+    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|awaiting_document_submission|awaiting_reply|Routine paused — heartbeat polling active. Issue set to in_review.|Nudge cadence: 24h/48h/stalled at 72h
+
+Step 20. Post issue comment: "Waiting for candidate reply. Issue status set to in_review. Heartbeat polling active (every 30 min). Nudge cadence: Nudge 1 at 24h, Nudge 2 at 48h, stalled at 72h."
 
 Step 21. On heartbeat resume (source = "api" with messageId in payload) → proceed to PHASE 4.
 ```
@@ -404,6 +423,12 @@ Use skill: [`skills/document-validator.md`](../skills/document-validator.md)
 → Match attachments against checklist → decide next action
 
 ```
+Step 21a. Set Paperclip issue status back to "in_progress":
+    PATCH /api/issues/{PAPERCLIP_TASK_ID}
+    body: { "status": "in_progress" }
+    → Candidate has replied — routine is actively processing again.
+    → On failure: log warning, continue — non-blocking.
+
 Step 22. Confirm sender is employee_email or alternate_candidate_email.
     → if neither: outlook_send_email to human_in_loop_email, do not proceed without approval
     → Append to audit-log.csv (CSV append pattern):
@@ -467,8 +492,69 @@ Step 25a. Teams notification (non-blocking):
 | rehire | Resume, Updated Address, Address Proof, PAN/Aadhar if changed, Full Name, Email, DOB |
 
 ```
+⚠️ INVOKE DOCUMENT VALIDATOR SKILL — MANDATORY. DO THIS FIRST. NO EXCEPTIONS.
+
+Before ANY step below, read and execute the full document-validator skill:
+→ path: agents/hr/skills/document-validator.md
+→ Execute ALL steps in order: Step 1 → Step 2 → Step 3 → Step 3b → Step 3c → Step 3d → Step 3e → Step 4 → Step 5 → Step 6
+→ Pass these caller inputs to the skill:
+   messageId          = {messageId from payload}
+   employee_full_name = {employee_full_name}
+   employee_email     = {employee_email}
+   employee_type      = {employee_type}
+   date_of_joining    = {date_of_joining}
+   date_of_birth      = {date_of_birth if provided, else omit}
+   permanent_address  = {permanent_address if provided, else omit}
+   temporary_address  = {temporary_address if provided, else omit}
+
+→ The skill returns a structured validation result with: checklist, mismatch_flags, identity_checks, validation_summary, decision
+→ Store this result — Steps 26–30 below use it directly
+
+If the skill is not invoked → this entire phase is invalid. Do NOT proceed to Steps 26–30 without a skill result in hand.
+Steps 27–29 below are summaries of what the skill covers — they are NOT a replacement for the skill.
+
+⚠️ MANDATORY — STEP ZERO BEFORE ANY VALIDATION. NO EXCEPTIONS.
+
+Call `outlook_read_attachment` on EVERY attachment before running any check below.
+This is not optional. This is not implied. This must be done explicitly for each file.
+
+For each attachment from `outlook_list_attachments`:
+  outlook_read_attachment
+  → messageId: "{messageId}"
+  → attachmentId: "{attachmentId}"
+
+  File type handling:
+  → image (.jpg/.jpeg/.png/.gif/.webp): Claude vision reads content directly — inspect visually
+  → PDF: use extractedText. If response contains warning: "SCANNED_PDF_NO_TEXT" → scanned image, no text layer → request candidate re-send as JPG/PNG
+  → DOCX: use extractedText
+  → .zip/.rar: do NOT open — flag immediately, ask candidate to re-send unzipped
+
+If ANY attachment is skipped here → ALL validation below is invalid. Do not proceed.
+Log each file read: "Read {filename} — {content type} — {extractedLength or 'visual'}"
+
+⚠️ MANDATORY PHOTO CONSISTENCY CHECK — run immediately after reading all attachments:
+
+Collect every photo found across all attachments:
+  - Photo on Aadhaar card
+  - Passport size photo (if submitted as separate attachment)
+  - Photo on passport (if submitted)
+  - Any other identity document with a photo
+
+If ≥ 2 photos collected:
+  → Compare visually: do all photos appear to be the same person?
+  → If apparent mismatch (different face, clearly different person):
+     → pc_status = BLOCK — `photo_identity_mismatch`
+     → outlook_send_email to human_in_loop_email IMMEDIATELY
+       subject: "HR Alert: Photo mismatch — {employee_full_name}"
+       body: which documents have conflicting photos (no ID digits)
+     → outlook_send_email to employee_email requesting correct photo re-upload
+     → Set status = discrepancy_found
+     → Append to audit-log.csv
+     → DO NOT proceed to Steps 27–29. STOP this validation round.
+  → If photos match → continue to Step 26
+
 Step 26. Append to audit-log.csv (CSV append pattern):
-    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|under_automated_review|under_automated_review|Document validation started|{N} attachments to review
+    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|under_automated_review|under_automated_review|Document validation started — all {N} attachments read via outlook_read_attachment|{N} attachments to review
 
 Step 27. For each received file, check:
     a. Presence (is it there?)

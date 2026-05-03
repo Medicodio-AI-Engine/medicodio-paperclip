@@ -1,6 +1,30 @@
 # Document Validator Skill
 
-Validates documents received via email attachments. Extracts content from all file types, checks against a caller-supplied checklist, and produces a structured result. The calling agent defines what documents are required and what to do with the result.
+Validates documents received via email attachments. Extracts content, checks against a caller-supplied checklist, runs identity and cross-document consistency checks, and returns a structured result. The calling agent defines what documents are required and acts on the result.
+
+**Caller must supply:** `messageId`, `employee_full_name`, `employee_email`, `employee_type`, `date_of_joining`. Optional: `date_of_birth`, `permanent_address`, `temporary_address`.
+
+---
+
+## Flags — two severities only
+
+| Severity | Meaning | Caller action |
+|----------|---------|--------------|
+| `BLOCK` | Do not accept. Stop submission. | Escalate to `human_in_loop_email` immediately. Notify candidate of specific issue (no raw ID digits). |
+| `WARN` | Provisional. Needs human sign-off. | Continue but escalate all WARN flags to `human_in_loop_email` before final acceptance. |
+
+**Silence = no issue.** Emit a flag only when action is required. Skipped checks, passing checks, and checks not applicable to this employee type emit nothing.
+
+Every flag has this shape:
+```json
+{
+  "type": "<flag_type>",
+  "severity": "BLOCK | WARN",
+  "documents_involved": ["filename.ext"],
+  "message": "Human-readable. No government ID digits — use [REDACTED].",
+  "recommended_action": "What the caller should do."
+}
+```
 
 ---
 
@@ -23,80 +47,214 @@ For each attachment, call `outlook_read_attachment`:
 
 | File type | Supported | What you get |
 |-----------|-----------|-------------|
-| `.pdf` | ✅/⚠️ | `extractedText` — full plain text from all pages. If response contains `warning: "SCANNED_PDF_NO_TEXT"`, the PDF is a scanned image with no text layer — treat as `needs_manual_review`, notify `human_in_loop_email`, and ask candidate to re-send as a JPG/PNG image or a text-layer PDF |
-| `.docx` | ✅ Yes | `extractedText` — full plain text from the document |
-| `.txt / .csv / .md` | ✅ Yes | `text` — raw file content |
-| `.jpg / .jpeg` | ✅ Yes | Image content block — Claude vision reads it directly |
-| `.png` | ✅ Yes | Image content block — Claude vision reads it directly |
-| `.gif` | ✅ Yes | Image content block — Claude vision reads it directly |
-| `.webp` | ✅ Yes | Image content block — Claude vision reads it directly |
-| `.heic / .tiff` | ⚠️ Uncertain | Flag for manual review — may not extract |
-| `.zip / .rar` | ❌ No | Flag as received, instruct candidate to send files unzipped |
-| Other binary | ❌ No | Metadata only — flag as received, note manual verification needed |
+| `.pdf` | ✅/⚠️ | `extractedText`. If response has `warning: "SCANNED_PDF_NO_TEXT"` → scanned image, no text layer → treat as `needs_manual_review`, notify `human_in_loop_email`, ask candidate to re-send as JPG/PNG or text-layer PDF |
+| `.docx` | ✅ | `extractedText` |
+| `.txt / .csv / .md` | ✅ | `text` |
+| `.jpg / .jpeg / .png / .gif / .webp` | ✅ | Image content block — Claude vision reads directly |
+| `.heic / .tiff` | ⚠️ | Flag for manual review — may not extract |
+| `.zip / .rar` | ❌ | Ask candidate to send files unzipped. BLOCK that attachment. |
+| Other binary | ❌ | Metadata only — flag for manual verification |
 
-**Every response includes `contentBytes` (base64) and `contentType`.** The calling agent MUST retain both fields per attachment — they are required in Phase 9 to upload the original file to SharePoint via `sharepoint_upload_binary`. Do not discard them after validation.
+**Retain `contentBytes` (base64) and `contentType` per attachment** — required by the calling routine for SharePoint upload. Do not discard after validation.
 
-**Note on image quality:** Claude vision can read scanned documents, ID cards, certificates, and photos. If an image is blurry, too dark, or resolution is very low, flag it as `unclear` and request a re-upload with specific feedback (e.g., "The image of your degree certificate is blurry — please provide a clearer scan").
+Combine email body text + all extracted attachment text → **full submission text** for matching.
 
-Combine: email body text + all extracted attachment text → **full submission text** for matching.
+---
 
-For image attachments: visually inspect for document type, name visible on document, and any key fields (DOB, ID number, etc.).
+### 2a — Readability check (run first on every file)
+
+If an image or scanned PDF is blurry, too dark, overexposed, or low-resolution such that **any critical field** (name, DOB, ID number, dates, institution name) cannot be read:
+
+→ Emit BLOCK flag `unreadable_document`. Do not attempt any further checks on that file.
+
+```
+message: "Document is too blurry / low-resolution to read critical fields."
+recommended_action: "Ask candidate to re-upload a clear, high-resolution scan or photo."
+```
+
+---
+
+### 2b — AI-generation detection (run on every file before identity checks)
+
+Flag if **either** visual OR metadata signal is present.
+
+**Visual signals** (images and scanned PDFs):
+- Pixel-perfect fonts with zero scan artifacts or compression noise
+- No official stamps, seals, watermarks, or embossed marks
+- Suspiciously uniform margins and spacing — template-generated appearance
+- No fold marks, shadows, or physical document texture
+- Signatures look typed or are unnaturally uniform
+
+**Metadata signals** (PDFs and DOCX):
+- Creator/producer field references Canva, Adobe Firefly, DALL-E, Midjourney, ChatGPT, or similar AI/design tools
+- Document creation date is recent but document claims to be historical (e.g., degree cert PDF created 2026, degree awarded 2019)
+- No scanner or printer metadata on a document that should be a physical scan
+
+If any signal is present → Emit BLOCK flag `suspected_ai_generated`. Stop all further validation for that file. Escalate to `human_in_loop_email` immediately.
+
+```
+message: "Document shows signs of AI generation or digital fabrication ({brief reason — visual or metadata signal})."
+recommended_action: "Escalate to human immediately. Do not accept. Request original physical document scan."
+```
 
 ---
 
 ## Step 3 — Match against the required checklist
 
-The **calling agent** provides the checklist — a list of required items with keywords to detect.
+The calling agent provides the checklist — required items with keywords to detect.
 
 For each required item:
+- `present` — found in text, attachment name, or extracted text/image
+- `pending` — not found anywhere
+- `unclear` — partial match, ambiguous, needs follow-up
 
-- `present` — explicitly mentioned in text OR attachment name matches OR extracted text / image contains identifying keywords
-- `pending` — not found anywhere in submission
-- `unclear` — partial mention, ambiguous, needs follow-up
-
-**Matching tips:**
-- Normalise text: lowercase, strip punctuation before keyword search
-- A single attachment may satisfy multiple checklist items (e.g., Aadhaar satisfies both Photo ID and Address Proof)
-- An attachment that is clearly a different document (e.g., a company PRD, meeting notes) does NOT count for any checklist item
-- For images: use visual content to identify document type even if no text label is present
+**Tips:**
+- Normalise: lowercase, strip punctuation before keyword search
+- One attachment may satisfy multiple items (e.g., Aadhaar → Photo ID + Address Proof)
+- Attachments clearly unrelated to the checklist (company PRDs, meeting notes) do not count
+- For images: use visual content to identify document type even without a text label
 
 ---
 
-## Step 3b — Verify document details match candidate details
+## Step 3b — Identity checks: name and DOB
 
-The calling agent provides the candidate's known details: `employee_full_name`, `employee_email`, `date_of_birth` (if available).
+**Pre-processing before any comparison:**
+- Strip name prefixes: Mr, Mrs, Ms, Dr, Prof, Shri, Smt
+- Strip name suffixes: Jr, Sr, II, III, IV
+- Normalise: lowercase, collapse whitespace
+- DOB: normalise all formats to `YYYY-MM-DD` before comparing (handle `DD/MM/YYYY`, `DD-MM-YYYY`, `Month DD YYYY`)
 
-For each document that contains a name, DOB, or other identity field, cross-check against the candidate's details:
+**Name matching rules:**
 
-| Check | How to verify | Result if mismatch |
-|-------|--------------|-------------------|
-| Name on document matches `employee_full_name` | Compare (allow minor spelling variations, initials) | `name_mismatch` — log and flag |
-| DOB on document matches provided DOB | Compare date | `dob_mismatch` — log and flag |
-| Name consistent across ALL submitted documents | Compare names on PAN, Aadhaar, certificates, payslips | `cross_doc_name_mismatch` — log and flag |
+| Scenario | Outcome |
+|----------|---------|
+| Exact match after normalisation | Pass — no flag |
+| Same tokens, different order ("Rajan Karthik" vs "Karthik Rajan") | Pass — no flag |
+| Initials match full name ("K. Rajan" vs "Karthik Rajan") | WARN — `name_variation` |
+| Middle name present on doc but absent in payload (or vice versa) | WARN — `name_variation` |
+| Single-character typo | WARN — `name_variation` |
+| Clearly different name (different first name or surname — not a variation) | BLOCK — `name_mismatch` |
 
-**Mismatch handling:**
-- Minor variation (e.g., "Karthik R" vs "Karthik Rajan") → flag as `unclear`, note in record, escalate to human
-- Clear mismatch (different name entirely) → flag as `name_mismatch`, do NOT accept document, notify human_in_loop_email immediately
-- DOB mismatch → same — flag, notify human, do not accept
+**DOB matching rules:**
 
-Add `identity_checks` to the result object (see Step 4).
+| Scenario | Outcome |
+|----------|---------|
+| Exact match after normalisation | Pass — no flag |
+| Only partial DOB visible (year only, or month+year) | Pass — insufficient to dispute |
+| Full date visible and does not match | BLOCK — `dob_mismatch` |
+| `date_of_birth` not supplied by caller | Skip — no flag |
+
+**Cross-document name consistency:**
+After checking each document against `employee_full_name`, compare names across all submitted documents against each other. If two documents show clearly different names (not a variation):
+→ BLOCK — `cross_doc_name_mismatch`
+```
+documents_involved: ["{doc_A}", "{doc_B}"]
+message: "Name on {doc_A} does not match name on {doc_B}."
+```
+
+---
+
+## Step 3c — Universal cross-document consistency checks
+
+Run for all employee types. Emit only when a conflict is found.
+
+**PAN consistency** (if PAN is visible on ≥2 documents):
+- Compare PAN across documents
+- Mismatch → BLOCK — `pan_number_mismatch`
+- Never include actual PAN digits in the flag message — use `[REDACTED]`
+
+**Address consistency** (if `permanent_address` or `temporary_address` supplied):
+- Extract address from Aadhaar and any address proof
+- Significant mismatch (different city or state) → WARN — `address_mismatch`
+- Minor variation (abbreviation, missing pin code) → no flag
+
+**Photo consistency** (if ≥2 photos present — e.g., Aadhaar + passport photo + submitted photo):
+- Visually compare: do they appear to be the same person?
+- Apparent mismatch → WARN — `photo_identity_mismatch`; escalate to human
+
+---
+
+## Step 3d — Employee-type-aware cross-document checks
+
+Apply only the branch matching `employee_type`. Emit nothing for inapplicable branches.
+
+### fte / experienced
+
+**Payslip employer vs relieving letter employer:**
+- Extract employer from each payslip and each relieving letter
+- Payslip employer not found in any relieving letter → WARN — `employer_name_mismatch`
+- Use label "payslip employer" / "relieving letter employer" in message — do not log actual company name
+
+**Payslip recency:**
+- All 3 payslips must fall within 4 months before `date_of_joining`
+- Any payslip older than that → WARN — `payslip_stale`
+
+**Payslip month continuity:**
+- 3 payslips must represent 3 consecutive calendar months
+- Gaps present → WARN — `payslip_months_not_consecutive`
+
+**Relieving letter date:**
+- Relieving letter date must be before `date_of_joining`
+- Date is after `date_of_joining` → WARN — `relieving_letter_date_conflict`
+
+### fresher / intern
+
+**Education certificate year sequence:**
+- Extract year from each cert: SSLC/10th, PUC/12th/Diploma, Degree
+- Sequence must be: SSLC year < 12th year < Degree year
+- Impossible sequence → BLOCK — `education_year_sequence_invalid`
+- Plausible but suspiciously compressed timeline (e.g., degree 1 year after 10th) → WARN — `education_timeline_implausible`
+
+### contractor
+
+No employment cross-checks. Skip this step entirely.
+
+### rehire
+
+Only validate newly submitted documents. Reused docs from a prior case are not re-validated unless another check (expiry, name mismatch, AI generation) flags them. Emit nothing for clean reused docs.
+
+---
+
+## Step 3e — Document validity and expiry checks
+
+**Passport:**
+- Expired as of `date_of_joining` → BLOCK — `passport_expired`
+- Expires within 6 months of `date_of_joining` → WARN — `passport_expiring_soon`
+- Expiry date not readable → no flag
+
+**Address proof (utility bills, bank statements, rental agreements):**
+- Document date more than 3 months before `date_of_joining` → WARN — `address_proof_stale`
+- Date not readable → no flag
+
+**Relieving letter (fte/experienced only):**
+- Date after `date_of_joining` → WARN — `relieving_letter_date_conflict` (emit once — do not duplicate if already flagged in Step 3d)
 
 ---
 
 ## Step 4 — Build a structured validation result
 
-**DATA SENSITIVITY:** Never include actual Aadhaar digits, PAN digits, or any government ID number in the `evidence` field or `notes` field. Use `[REDACTED]` as a placeholder. The result object is passed to other agents and may appear in logs or emails.
+**DATA SENSITIVITY:** Never include Aadhaar digits, PAN digits, or any government ID number in any field. Use `[REDACTED]`.
 
-Return this object (the calling agent decides what to do with it):
+**Decision logic:**
+- Any `BLOCK` flag → `decision: "blocked"`
+- No BLOCK + ≥1 WARN → `decision: "provisional"`
+- Zero flags → `decision: "proceed"`
 
 ```json
 {
   "sender": { "name": "...", "email": "..." },
   "attachments": [
-    { "name": "file.pdf", "contentType": "application/pdf", "readable": true, "extractedLength": 1200, "messageId": "AAMkAGI...", "attachmentId": "AAMkAGI...att" }
+    {
+      "name": "aadhaar.jpg",
+      "contentType": "image/jpeg",
+      "readable": true,
+      "extractedLength": 800,
+      "messageId": "AAMkAGI...",
+      "attachmentId": "AAMkAGI...att"
+    }
   ],
   "checklist": [
-    { "item": "Aadhaar Card", "status": "present", "evidence": "Aadhaar card received — number [REDACTED]" },
+    { "item": "Aadhaar Card", "status": "present", "evidence": "Aadhaar received — number [REDACTED]" },
     { "item": "PAN Card", "status": "pending", "evidence": null },
     { "item": "Highest Qualification Certificate", "status": "unclear", "evidence": "Certificate present but blurry — re-upload requested" }
   ],
@@ -106,52 +264,70 @@ Return this object (the calling agent decides what to do with it):
     "pending": 2,
     "unclear": 1
   },
+  "mismatch_flags": [
+    {
+      "type": "suspected_ai_generated",
+      "severity": "BLOCK",
+      "documents_involved": ["degree_cert.pdf"],
+      "message": "Degree certificate PDF was created by Canva (PDF metadata). Document claims issue year 2019 but PDF creation date is 2026.",
+      "recommended_action": "Escalate to human immediately. Do not accept. Request original physical scan."
+    },
+    {
+      "type": "payslip_stale",
+      "severity": "WARN",
+      "documents_involved": ["payslip_jan2025.pdf"],
+      "message": "Payslip date is more than 4 months before joining date.",
+      "recommended_action": "Request a more recent payslip or HR confirmation."
+    }
+  ],
   "identity_checks": {
-    "name_on_documents": "Karthik Rajan",
-    "name_matches_candidate": true,
+    "name_on_documents": "Karthik R.",
+    "name_matches_candidate": "warn",
     "dob_on_documents": "1995-06-15",
     "dob_matches_candidate": true,
-    "cross_doc_name_consistent": true,
-    "mismatches": []
+    "cross_doc_name_consistent": true
   },
-  "notes": "All identity fields consistent across submitted documents."
+  "validation_summary": {
+    "block_count": 1,
+    "warn_count": 1,
+    "decision": "blocked"
+  },
+  "notes": "One document blocked — suspected AI generation. One payslip warning requires human review."
 }
 ```
+
+`identity_checks.name_matches_candidate` values: `true` (exact/equivalent match), `"warn"` (variation — needs human), `false` (mismatch — blocked).
 
 ---
 
 ## Step 5 — Reply with HTML (always)
 
-**Before sending:** Confirm the reply body contains no raw Aadhaar, PAN, or government ID digits. If referencing a received document, use "Aadhaar Card ✓" not the number itself.
+**Check before sending:** No raw Aadhaar, PAN, or government ID digits in the reply body.
 
-**All replies from this skill MUST use `isHtml: true`.** Never send plain text — formatting is lost in Outlook.
+All replies MUST use `isHtml: true`. Never plain text.
 
-The calling agent provides the reply template. This skill populates it with the actual missing/present items and sends:
+The calling agent provides the reply template. This skill fills it with actual results:
 
 ```
 outlook_reply
   messageId: "{messageId}"
-  body: "{HTML body from calling agent's template, filled with actual results}"
+  body: "{HTML body from calling agent's template}"
   isHtml: true
   replyAll: false
 ```
 
-**HTML formatting rules:**
-- Paragraphs → `<p>...</p>`
-- Numbered lists → `<ol><li>...</li></ol>`
-- Bullet lists → `<ul><li>...</li></ul>`
-- Bold emphasis → `<strong>...</strong>`
-- Signature line breaks → `<br>`
-- Never use markdown (`**`, `-`, `\n`) in the body — HTML only
+HTML rules: `<p>` paragraphs, `<ol><li>` numbered lists, `<ul><li>` bullet lists, `<strong>` bold, `<br>` signature breaks. No markdown in body.
 
 ---
 
 ## Step 6 — Return result to calling agent
 
-Pass the validation result back. The calling agent decides:
-- Whether to escalate, follow up, or proceed
-- What to save to SharePoint or other storage
-- Whether to notify a human reviewer
-- What the next step in its own workflow is
+Pass the result back. Caller acts on `validation_summary.decision`:
 
-This skill does not make those decisions.
+| `decision` | Caller action |
+|-----------|--------------|
+| `"proceed"` | All checks passed. Continue to next phase. |
+| `"provisional"` | WARN flags present. Escalate all WARN flags to `human_in_loop_email` before final acceptance. |
+| `"blocked"` | BLOCK flag(s) present. Do NOT accept submission. Escalate to `human_in_loop_email` immediately. Notify candidate of specific issue without exposing ID digits. |
+
+This skill does not decide what happens next — the calling routine owns that.

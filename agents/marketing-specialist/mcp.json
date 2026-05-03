@@ -54,6 +54,13 @@
         "TEAMS_CLIENT_ID": "${OUTLOOK_CLIENT_ID}",
         "TEAMS_CLIENT_SECRET": "${OUTLOOK_CLIENT_SECRET}"
       }
+    },
+    "resend": {
+      "command": "npx",
+      "args": ["-y", "resend-mcp"],
+      "env": {
+        "RESEND_API_KEY": "${RESEND_API_KEY}"
+      }
     }
   }
 }

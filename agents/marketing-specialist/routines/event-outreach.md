@@ -114,7 +114,9 @@ The agent does NOT assume column names. On first run it reads all headers, infer
 # IMPORTANT: column_index is 0-BASED. A=0, B=1, C=2, ... Z=25, AA=26, AB=27, ...
 # Conversion formula: index < 26 → single letter (A+index); index >= 26 → two letters (AA=26, AB=27, ...)
 
+name_prefix: Dr           | -1    ← optional, absent = -1
 first_name:  First Name   | 0
+middle_name: Middle Name  | -1    ← optional, absent = -1
 last_name:   Last Name    | 1
 email:       Email        | 2
 company:     Company Name | 3
@@ -126,101 +128,111 @@ title:       Job Title    | 5     ← optional, absent = -1
 
 | Canonical field | Match any of these (case-insensitive, partial ok) |
 |-----------------|---------------------------------------------------|
+| `name_prefix` | prefix, salutation, title_prefix, honorific, mr, dr |
 | `first_name` | first name, firstname, fname, given name, first |
+| `middle_name` | middle name, middlename, middle initial, middle |
 | `last_name` | last name, lastname, lname, surname, family name, last |
 | `email` | email, e-mail, email address, work email, contact email |
-| `company` | company, company name, organization, organisation, employer, account, firm |
+| `company` | company, company name, organization, organisation, organization_name, org_name, org, employer, account, account_name, firm, institution, facility, practice, hospital, center, clinic |
 | `domain` | domain, website, url, web, site |
 | `title` | title, job title, jobtitle, position, role, designation |
 | `prior_delivery_status` | email_delivery_status, delivery_status, mail_delivery_status, send_status |
 
 Required canonical fields: `first_name`, `last_name`, `company`  
-Optional: `email` (Hunter fills if absent), `domain`, `title`, `prior_delivery_status` (prior system sent flag)
+Optional: `email` (Hunter fills if absent), `name_prefix`, `middle_name`, `domain`, `title`, `prior_delivery_status` (prior system sent flag)
+
+Name assembly rule: build display name as `[first_name] [middle_name if present] [last_name]`. For Hunter API calls, send `first_name` + `last_name` only — exclude `name_prefix` and `middle_name` (they hurt match rate).
 
 ### Audit columns (agent writes — auto-created on first run)
 
 | Column | Values |
 |--------|--------|
 | `pc_status` | `pending` → `sent` / `draft_created` / `email_not_found` / `skipped` / `error` |
-| `pc_email_source` | `original` / `hunter` / `none` |
+| `pc_email_source` | `original` / `hunter` / `guessed` / `none` — ONLY these 4 values. NEVER write `hunter_email_finder`, `hunter/email_finder`, or any other variant. |
 | `pc_email_used` | Final email address used (original or Hunter-found) |
 | `pc_draft_created_at` | ISO timestamp when draft was created in Outlook |
 | `pc_sent_at` | ISO timestamp when email was actually sent (filled on approval/send — blank until then) |
 | `pc_event` | `{event_slug}` from config — links row to specific event |
 | `pc_draft_id` | Outlook draft message ID (only if `send_mode: draft_review`) |
+| `pc_resend_id` | Resend email ID returned by `resend_send_email` — used by PRE-CHECK A to call `resend_get_email` for delivery status |
 | `pc_hunter_confidence` | Hunter confidence score (0–100) if Hunter was used |
-| `pc_hunter_method` | `email_finder` / `domain_search` / `none` — which Hunter method found the email |
+| `pc_hunter_method` | `email_finder` / `domain_pattern` / `pattern_fallback` / `none` — which Hunter method found the email |
 | `pc_email_risk` | `deliverable` / `risky` / `undeliverable` — Hunter verify result |
 | `pc_notes` | Error detail or skip reason |
-| `pc_delivery_status` | `delivered` / `bounced` — filled by PRE-CHECK A after 24hrs |
-| `pc_delivery_notes` | Bounce reason (first 200 chars of NDR) |
+| `pc_delivery_status` | `delivered` / `bounced` / `complained` — filled by PRE-CHECK A via Resend API |
+| `pc_delivery_notes` | Bounce/complaint detail or engagement event from Resend |
 | `pc_reply_received` | `yes` / blank — filled by PRE-CHECK B |
 | `pc_reply_intent` | `demo_interest` / `out_of_office` / `positive` / `negative` / `neutral` |
 | `pc_reply_snippet` | First 100 chars of reply body |
 
 ---
 
-## PRE-CHECK A — Delivery Status (bounces for rows sent >24hrs ago)
+## PRE-CHECK A — Delivery Status (via Resend API)
 
-Run this before anything else. Updates Excel with bounce data from prior sends.
+Run this before anything else. Checks delivery status for every sent email using `resend_get_email`.
+Do NOT use Outlook — emails are sent via Resend, Resend is the source of truth.
 
 ```
-A1. Read event_slug from issue description (same as Phase 0 — needed for file paths).
-    If missing, skip pre-checks and go straight to Phase 0.
+A1. Read event_slug from issue description. If missing → skip pre-checks, go to PHASE 0.
 
-A2. Read ONLY audit columns — never read the full sheet (full read = token overflow).
-    ALWAYS use row-bounded ranges. NEVER use unbounded column addresses like "BV:CK".
+A2. Find candidate rows — two columns only:
 
-    STEP 1: Read header row only to find audit column letters:
+    STEP 1: Read header row to find column letters:
     sharepoint_excel_read_range
-    → address: "A1:ZZ1"   ← header row only, all columns
-    → find index of: pc_status, pc_event, pc_email_used, pc_sent_at, pc_delivery_status, pc_delivery_notes
-    → convert index to Excel column letter (A=0, B=1, ... Z=25, AA=26, ...)
+    → address: "A1:ZZ1"
+    → find column letters for: pc_status, pc_delivery_status, pc_resend_id, pc_delivery_notes, pc_email_used
 
-    STEP 2: Determine last data row — read pc_status column only with a ceiling:
+    STEP 2: Determine last_row from pc_status column:
     sharepoint_excel_read_range
-    → address: "{pc_status_col}1:{pc_status_col}2000"   ← single column, capped at 2000
+    → address: "{pc_status_col}1:{pc_status_col}2000"
     → count non-empty cells (excluding header) → last_row
+    → If last_row = 0: skip to PRE-CHECK B
 
-    If last_row = 0: skip to PRE-CHECK B (no data rows).
-
-    STEP 3: Read pc_status + pc_event only to find candidate rows:
+    STEP 3: Read pc_status + pc_delivery_status — find rows to check:
     sharepoint_excel_read_range
-    → address: "{pc_status_col}1:{pc_event_col}{last_row}"   ← 2 columns, row-bounded
-    → collect row numbers where pc_status = "sent" AND pc_event = {event_slug}
+    → address: "{pc_status_col}1:{pc_delivery_status_col}{last_row}"
+    → collect row numbers where pc_status = "sent" AND pc_delivery_status is empty
+    → If none: skip to PRE-CHECK B
 
-    If none: skip to PRE-CHECK B.
+A3. For each candidate row:
 
-    STEP 4: Read delivery columns only for candidate rows — 3 columns max, row-bounded:
-    sharepoint_excel_read_range
-    → address: "{pc_email_used_col}1:{pc_delivery_notes_col}{last_row}"   ← 3 columns, row-bounded
-    → filter to candidate rows where pc_delivery_status is empty (not yet checked)
+    Read pc_resend_id for this row:
+    sharepoint_excel_read_range → address: "{pc_resend_id_col}{row}:{pc_resend_id_col}{row}"
 
-    Check every sent row regardless of when it was sent — no 24hr restriction.
-    If none: skip to PRE-CHECK B.
+    IF pc_resend_id is non-empty:
+    → resend_get_email id="{pc_resend_id}"
+      Uses: GET https://api.resend.com/emails/{id}
+      Returns: { last_event: "delivered"|"opened"|"clicked"|"bounced"|"complained"|"queued"|"sent", ... }
 
-A3. For each such row:
-    Check Outlook inbox for bounce/NDR:
-    outlook_search_mail
-    → mailbox: {outlook_user}
-    → query: "from:mailer-daemon OR from:postmaster {pc_email_used}"
-    → look for bounce/NDR referencing that email address
+      Map last_event → pc_delivery_status:
+      "delivered"  → pc_delivery_status = "delivered",   pc_delivery_notes = blank
+      "opened"     → pc_delivery_status = "delivered",   pc_delivery_notes = "opened"
+      "clicked"    → pc_delivery_status = "delivered",   pc_delivery_notes = "clicked"
+      "bounced"    → pc_delivery_status = "bounced",     pc_delivery_notes = "Bounce reported by Resend"
+      "complained" → pc_delivery_status = "complained",  pc_delivery_notes = "Spam complaint"
+      "queued"     → leave blank (in transit — recheck next run)
+      "sent"       → leave blank (in transit — recheck next run)
+      API error    → pc_delivery_notes = "Resend API error: {error}", leave pc_delivery_status blank
 
-    If bounce found in Outlook:
-    → pc_delivery_status = "bounced"
-    → pc_delivery_notes = bounce reason (first 200 chars of NDR body)
-    → continue to next row
+    IF pc_resend_id is empty:
+    → FIRST check pc_notes for a salvageable Resend ID:
+      Read pc_notes for this row. If pc_notes contains text matching pattern "resend_id:{uuid}":
+      → extract the UUID → use as resend_id for resend_get_email call
+      → immediately write extracted ID to pc_resend_id column for this row
+      → proceed with resend_get_email as if pc_resend_id was populated
 
-    If no Outlook bounce found:
-    → pc_delivery_status = "delivered"
-    → pc_delivery_notes = blank
+    IF pc_resend_id is empty AND pc_notes has no resend_id pattern:
+    → pc_delivery_status = "unknown"
+    → pc_delivery_notes  = "no resend_id stored — email sent before Resend ID tracking was added"
+    → no Resend API call
 
-A4. sharepoint_excel_write_range → write pc_delivery_status + pc_delivery_notes for updated rows
+A4. sharepoint_excel_write_range → write pc_delivery_status + pc_delivery_notes for all updated rows
 
 A5. Post comment:
-    "PRE-CHECK A: {delivered_count} delivered, {bounced_count} bounced, {skipped_count} skipped (< 24hrs or already checked)."
+    "PRE-CHECK A: {delivered_count} delivered, {bounced_count} bounced, {complained_count} complained,
+     {unknown_count} unknown (no resend_id), {in_transit_count} still in transit (recheck next run)."
 
-    → NEXT: Proceed immediately to PRE-CHECK B. Do not stop.
+    → NEXT: PRE-CHECK B. Do not stop.
 ```
 
 ---
@@ -392,8 +404,8 @@ B5. Post comment:
     sharepoint_get_file_info
     path="Marketing-Specialist/event-outreach/{event_slug}/column-map.md"
 
-    IF exists → check if it contains `prior_delivery_status` mapping.
-        If NOT present → delete and re-detect (column map is stale, missing new fields).
+    IF exists → check if it contains `prior_delivery_status` AND `middle_name` AND `pc_resend_id` mappings.
+        If any NOT present → delete and re-detect (column map is stale, missing new fields).
 
     IF exists AND contains all required fields → LOAD cached map:
         sharepoint_read_file
@@ -433,12 +445,15 @@ B5. Post comment:
         domain:                 {matched_header}  | {index or -1}
         title:                  {matched_header}  | {index or -1}
         prior_delivery_status:  {matched_header}  | {index or -1}
+        name_prefix:            {matched_header}  | {index or -1}
+        middle_name:            {matched_header}  | {index or -1}
         pc_status:              pc_status         | {index}
         pc_email_source:        pc_email_source   | {index}
         pc_email_used:          pc_email_used     | {index}
         pc_sent_at:             pc_sent_at        | {index}
         pc_event:               pc_event          | {index}
         pc_draft_id:            pc_draft_id       | {index}
+        pc_resend_id:           pc_resend_id      | {index or -1}
         pc_delivery_status:     pc_delivery_status| {index or -1}
         pc_delivery_notes:      pc_delivery_notes | {index or -1}
         pc_reply_received:      pc_reply_received | {index or -1}
@@ -471,10 +486,11 @@ B5. Post comment:
     of them and proceed. Do NOT interpret many empty rows as an error or as "nothing to do."
 
     PRIMARY rule — a row is SKIPPED if pc_status is non-empty (any value):
-    → pc_status = "sent"           → SKIP (emailed this event)
+    → pc_status = "sent"            → SKIP (emailed this event)
     → pc_status = "draft_created"  → SKIP (drafted, awaiting approval)
     → pc_status = "skipped"        → SKIP (intentionally skipped)
-    → pc_status = "email_not_found"→ SKIP (no email found, cannot send)
+    → pc_status = "email_not_found"→ SKIP (domain found, no email found)
+    → pc_status = "domain_not_found"→ SKIP (domain unknown — web search + DDG both failed)
     → pc_status = "error"          → SKIP (failed — do not retry automatically)
     → pc_status = "pending"        → eligible (was staged but not yet sent)
 
@@ -508,86 +524,151 @@ B5. Post comment:
 
 ---
 
-## PHASE 2 — Hunter Email Enrichment (missing_email rows only)
+## PHASE 2 — Hunter Email Enrichment (need_email rows only)
 
 Skip this phase entirely if `need_email` list is empty.
 
 ```
-2a. Check credit budget BEFORE processing any row:
+2a. Check Hunter credit balance (no credits consumed):
     hunter_account_info
     → store: search_credits_remaining, verify_credits_remaining
-    → unprocessed_remaining = total eligible rows not yet sent across all batches
-    → safe_fallback_budget  = search_credits_remaining - unprocessed_remaining - 20
-      (20 = safety buffer)
-    → if safe_fallback_budget > 0: fallback_allowed = true
-    → else: fallback_allowed = false
-    → Post comment: "Hunter budget check: {search_credits_remaining} search / {verify_credits_remaining} verify credits remaining. Fallback domain search: {fallback_allowed}."
+    → Post comment: "Hunter budget: {search_credits_remaining} search / {verify_credits_remaining} verify credits remaining."
 
-2b. For each row in need_email:
+2b. For each row in need_email — execute ALL 4 steps in strict order.
+    NEVER skip a step. NEVER mark email_not_found before completing all applicable steps.
 
-    STEP 1 — Resolve domain (free, no credits):
-    → If col_domain exists and cell non-empty → use it directly, skip DuckDuckGo
-    → Else: duckduckgo_search query='"{company}" official website'
-      → extract domain from first result URL (strip www., keep base domain)
-      → If no domain found → mark pc_status="email_not_found", pc_notes="domain not found", continue to next row
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    STEP 1 — Domain Discovery (free, no credits)
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    STEP 2 — Primary: hunter_find_email (name + domain):
+    ⚠️ CRITICAL — NEVER skip web search when domain column is absent:
+    domain_col = -1 in column map means the spreadsheet has NO pre-stored domain column.
+    This is the NORMAL case for most attendee files.
+    It does NOT mean "search unavailable." You MUST run WebSearch to discover the domain.
+    Never jump to STEP 2 or STEP 3 or the SEARCH UNAVAILABLE path just because domain_col = -1.
+    Never call hunter_find_email with a company= parameter as a substitute for domain discovery.
+
+    ⚠️ CRITICAL — NEVER reuse a domain from another row or from memory:
+    If row 50 used "example.com", row 51 still MUST run WebSearch independently.
+    "From existing data", "from prior run", "same company as row X" — NONE of these are
+    valid reasons to skip WebSearch. Run it. Every. Row. No reuse. No shortcuts.
+
+    IF domain column exists (domain_col >= 0 in column map) AND this row's domain cell is non-empty:
+    → resolved_domain = cell value (skip web search entirely)
+    → proceed to STEP 2
+
+    ELSE — built-in Claude web_search (runs for ALL rows when domain_col = -1 OR domain cell is empty):
+    ⚠️ TOOL SELECTION — CRITICAL:
+    Use Claude's BUILT-IN WebSearch tool FIRST. In Claude Code this is the `WebSearch` tool
+    (tool name: WebSearch). This is NOT duckduckgo_web_search and NOT any MCP search tool.
+    NEVER use duckduckgo_web_search as the first attempt — it is the fallback ONLY.
+    The built-in WebSearch is always available, has no rate limit, and needs no MCP dependency.
+
+    ⚠️ ANTI-HALLUCINATION RULE — MANDATORY:
+    NEVER infer, guess, or reuse a domain from another row, prior session memory, or context.
+    Even if a different row in this batch or a prior batch used "physiciansoutpatientsurgery.com",
+    you MUST still run WebSearch for THIS row independently. Domains are per-row — never shared.
+    "I remember this domain from row X" is NOT valid. Run WebSearch. Every row. No exceptions.
+
+    Step A — Claude built-in WebSearch (ALWAYS first):
+    WebSearch query: '"{company}" official website'
+    → take hostname from first result URL
+    → strip www. prefix and any subdomains — keep the registrable domain + TLD as-is → resolved_domain
+      TLD examples: .com .ai .io .co .org .net .edu .health — ALL preserved exactly
+      (e.g. careers.stripe.com → stripe.com, app.medicodio.ai → medicodio.ai, go.acme.io → acme.io)
+    → if domain found → proceed to STEP 2
+
+    Step B — DuckDuckGo fallback (ONLY if Step A returns no results or errors):
+    duckduckgo_web_search query='"{company}" official website' count=5
+    → take hostname from first result URL
+    → strip www. prefix and any subdomains — keep registrable domain + TLD → resolved_domain
+    → if domain found → proceed to STEP 2
+
+    Step C — both failed:
+    → pc_status = "domain_not_found"
+    → pc_notes  = "built-in WebSearch and DDG both returned no results — domain unknown"
+    → pc_email_source = "none", pc_hunter_method = "none"
+    → STOP this row — do NOT proceed to Hunter
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    STEP 2 — Hunter Email Finder (1 search credit)
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    MUST run after STEP 1 succeeds. Never jump to STEP 3 without attempting STEP 2 first.
+
     hunter_find_email
-    → first_name: {first_name}
-    → last_name:  {last_name}
     → domain:     {resolved_domain}
-    → uses 1 search credit
+    → first_name: {first_name}   ← column map value, NOT full_name
+    → last_name:  {last_name}    ← column map value, NOT full_name
+    (do NOT send middle_name or name_prefix — hurts match rate)
 
-    On success (email returned):
-    → store: hunter_email = email, hunter_confidence = score
-    → pc_hunter_method = "email_finder"
-    → email_resolved = true
-    → SKIP Step 3 — do not use fallback
-    → proceed directly to STEP 4 (verify)
+    If email returned (any score):
+    → resolved_email       = email
+    → pc_email_source      = "hunter"  ← ALWAYS exactly "hunter" — never "hunter_email_finder" or "hunter/email_finder"
+    → pc_hunter_method     = "email_finder"
+    → pc_hunter_confidence = score
+    → SKIP STEP 3, proceed directly to STEP 4
 
-    On no result:
-    → proceed to STEP 3 (fallback)
+    If no email returned:
+    → proceed to STEP 3
+    (NEVER mark email_not_found here — STEP 3 must run first)
 
-    STEP 3 — Fallback: hunter_search_domain (only if Step 2 found nothing):
-    IF fallback_allowed = false:
-    → mark pc_status="email_not_found", pc_notes="credit budget exhausted, fallback skipped"
-    → continue to next row
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    STEP 3 — Pattern Guess via Hunter Domain Search (1 search credit)
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    MUST run if and only if STEP 2 returned no email. Never skip.
 
-    IF fallback_allowed = true:
     hunter_search_domain
     → domain: {resolved_domain}
-    → limit: 10
-    → uses 1 search credit
-    → decrement safe_fallback_budget by 1
-    → if safe_fallback_budget <= 0: set fallback_allowed = false for remaining rows
+    → limit:  10
 
-    → Scan returned emails, score each by name match:
-      score = 0
-      if first_name appears in result name → score += 2
-      if last_name appears in result name  → score += 3
-      select highest scoring result (minimum score 2 to accept)
+    Build candidate email list (all lowercase, using {first_name} and {last_name}):
 
-    On match found (score ≥ 2):
-    → store: hunter_email = matched email, hunter_confidence = result confidence
-    → pc_hunter_method = "domain_search"
-    → email_resolved = true
-    → proceed to STEP 4 (verify)
+    IF Hunter response contains a non-empty `pattern` field
+    (e.g. "{first}.{last}", "{f}{last}", "{first}{l}"):
+    → put Hunter pattern result FIRST in candidate list
+    → then append remaining standard patterns below (skip any duplicate)
 
-    On no match:
-    → mark pc_status="email_not_found", pc_email_source="none"
-    → continue to next row
+    Candidate list — try in order, max 2 attempts:
+    1. {hunter_pattern_result}@{resolved_domain}        ← if Hunter returned a pattern
+       ELSE {first_name}.{last_name}@{resolved_domain}  ← default first candidate
+    2. {first_name[0]}{last_name}@{resolved_domain}     (e.g. jsmith@domain.com)
 
-    STEP 4 — Verify email (always, for every Hunter-found email):
+    For each candidate — call hunter_verify_email (1 verify credit each):
+    → status = "valid"      → pc_email_risk = "deliverable" → resolved_email = candidate → STOP, proceed to STEP 4
+    → status = "accept_all" → pc_email_risk = "risky"       → resolved_email = candidate → STOP, proceed to STEP 4
+    → status = "unknown"    → pc_email_risk = "unknown"     → resolved_email = candidate → STOP, proceed to STEP 4
+    → status = "webmail"    → pc_email_risk = "risky"       → resolved_email = candidate → STOP, proceed to STEP 4
+    → status = "invalid" or "disposable" → discard, try next candidate
+
+    If BOTH candidates are invalid/disposable:
+    → pc_status = "email_not_found"
+    → pc_notes  = "tried: {candidate_1}={result_1}, {candidate_2}={result_2}"
+    → pc_email_source = "none", pc_hunter_method = "none"
+    → STOP this row
+
+    On first passing candidate:
+    → pc_email_source  = "guessed"
+    → pc_hunter_method = "domain_pattern" (if Hunter pattern was used) or "pattern_fallback" (if standard patterns only)
+    → proceed to STEP 4 (skip verify — already done above)
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    STEP 4 — Hunter Email Verifier (1 verify credit)
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    Runs for emails from STEP 2 only. SKIP if email came from STEP 3 — already verified there.
+
     hunter_verify_email
-    → email: {hunter_email}
-    → uses 1 verify credit
+    → email: {resolved_email}
 
-    Result handling:
-    → "deliverable"   → pc_email_risk="deliverable", email_resolved=true, proceed to send
-    → "risky"         → pc_email_risk="risky",        email_resolved=true, proceed to send + audit
-    → "undeliverable" → pc_email_risk="undeliverable", email_resolved=false,
-                         pc_status="email_not_found", pc_notes="undeliverable per Hunter verify"
-    → error/timeout   → pc_email_risk="unknown", treat as risky (send + audit)
+    status = "valid"      → pc_email_risk = "deliverable" → email_resolved = true → proceed to send
+    status = "accept_all" → pc_email_risk = "risky"        → email_resolved = true → proceed to send + audit
+    status = "unknown"    → pc_email_risk = "unknown"       → email_resolved = true → proceed to send + audit
+    status = "webmail"    → pc_email_risk = "risky"        → email_resolved = true → proceed to send + audit
+    status = "invalid"    → pc_email_risk = "undeliverable"
+                             pc_status    = "email_not_found"
+                             pc_notes     = "undeliverable per Hunter verify"
+                             email_resolved = false → STOP this row
+    status = "disposable" → same as "invalid" → STOP this row
+    error / 202 / timeout → pc_email_risk = "unknown", email_resolved = true → proceed to send + audit
 
 2c. After all rows processed, merge results into has_email group:
     → email_resolved = true  → add to sendable list
@@ -595,9 +676,9 @@ Skip this phase entirely if `need_email` list is empty.
 
 2d. Post comment:
     "Hunter enrichment complete.
-     Found (email_finder): {ef_count} | Found (domain_search): {ds_count}
+     Email Finder (hunter): {hunter_count} | Pattern guess (guessed): {guessed_count}
      Deliverable: {del_count} | Risky: {risky_count} | Undeliverable: {undel_count} | Not found: {nf_count}
-     Search credits remaining: ~{search_credits_remaining - credits_used}"
+     Search credits remaining: ~{search_credits_remaining}"
 
     → NEXT: PHASE 3 — Sufficiency check
 ```
@@ -610,7 +691,7 @@ Skip this phase entirely if `need_email` list is empty.
     content:
       🔍 Email Enrichment Complete — {event_name}<br>
       <br>
-      Found (email_finder): {ef_count} | Found (domain_search): {ds_count}<br>
+      Email Finder (hunter): {hunter_count} | Pattern guess (guessed): {guessed_count}<br>
       Not found: {nf_count} attendees<br>
       Deliverable: {del_count} | Risky: {risky_count} | Undeliverable: {undel_count}<br>
       <br>
@@ -667,14 +748,54 @@ Skip this phase entirely if `need_email` list is empty.
     → Else: use original Email column value
 
     Compose subject:
-    → Replace {event_name}, {first_name}, {booth_number}, {event_dates}, {event_location}
-      in email_subject from config
+    ⚠️ SUBJECT PERSONALISATION — MANDATORY FOR EVERY EMAIL:
+    Do NOT use the static email_subject from config as-is.
+    Craft a unique subject line for this specific person using their context:
+
+    Recipient context:
+    - Name:    {first_name}
+    - Title:   {title}
+    - Company: {company}
+    - Event:   {event_name}, {event_dates}, {event_location}
+
+    Rules:
+    - Max 60 characters (respects inbox preview limits)
+    - Must reference the event or an in-person meeting
+    - Angle must match the personalized body (same tone, same pain point)
+    - No ALL CAPS, no excessive punctuation, no clickbait
+    - If title is missing or unrecognisable → fall back to static email_subject from config
+      with placeholder substitution: {event_name}, {first_name}, {event_dates}, {event_location}
 
     Compose HTML body:
     → sharepoint_read_file path="Marketing-Specialist/event-outreach/{event_slug}/{email_body_file}"
-    → Replace all placeholders in template: {first_name}, {event_name}, {event_dates},
-      {event_location}, {booth_number}, {event_website}, {company}, {title}
-    → Append standard Medicodio signature block (below)
+      → This is the reference template — do NOT use it as-is. Use it as the guardrail for tone,
+        intent, length, and CTA. Craft a unique version for each recipient (see personalisation below).
+
+    ⚠️ PERSONALISATION — MANDATORY FOR EVERY EMAIL:
+    Using the reference template as your guide, craft a unique HTML email body for this specific person.
+
+    Recipient context:
+    - Name:    {first_name} {last_name}
+    - Title:   {title}  ← use this to infer what this person cares about professionally
+    - Company: {company}
+
+    Rules:
+    - KEEP: event name, dates, location, booth number, Medicodio intro, the reply CTA
+    - ADAPT: opening hook, pain point framing, value proposition angle — tailored to
+      what someone with the title "{title}" actually cares about day-to-day
+    - NEVER mention their job title explicitly in the email body
+    - NEVER fabricate facts about their company or their situation
+    - LENGTH: same as reference template (~150 words body)
+    - FORMAT: valid HTML body only — no markdown, no explanation, no wrapper tags outside <body> content
+    - If title is missing or unrecognisable → use the reference template as-is with placeholder substitution
+
+    Replace all placeholders in final output: {first_name}, {event_name}, {event_dates},
+    {event_location}, {booth_number}, {event_website}, {company}
+
+    ⚠️ IMPORTANT — SIGNATURE IS MANDATORY:
+    The standard Medicodio signature block MUST be appended to composed_html(Use Below mentioned) for EVERY email
+    and EVERY draft, no exceptions. Never send or create a draft without it.
+    Verify composed_html ends with the closing </table> of the signature before proceeding.
 
     Standard signature (always appended — never in config):
     ---
@@ -702,15 +823,23 @@ Skip this phase entirely if `need_email` list is empty.
     → to: {resolved_email}
     → subject: {composed_subject}
     → html: {composed_html}
-    → on success: mark pc_status = "sent", pc_draft_created_at = blank, pc_sent_at = now ISO
-    → on error: mark pc_status = "error", pc_notes = "{error}", continue
+
+    ⚠️ IMMEDIATELY after each send — write to Excel before moving to next row:
+    sharepoint_excel_write_range for THIS row only:
+    → pc_status    = "sent"
+    → pc_sent_at   = now ISO
+    → pc_resend_id = "{returned_resend_email_id}"  ← NEVER write resend ID into pc_notes
+    → on error: pc_status = "error", pc_notes = "{error_message_only}" — never put IDs in pc_notes
 
 4c. IF send_mode = "draft_review":
+    ⚠️ MANDATORY: confirm composed_html includes the signature block before creating draft.
+    If signature is missing → append it now. Never create a draft without the signature.
+
     outlook_create_draft
     → mailbox: {outlook_user}
     → to: {resolved_email}
     → subject: {composed_subject}
-    → body: {composed_html}
+    → body: {composed_html}    ← MUST include full signature block
     → bodyType: "HTML"
     → save returned draft message ID
     → mark pc_status = "draft_created", pc_draft_id = "{draftId}", pc_draft_created_at = now ISO, pc_sent_at = blank
@@ -749,12 +878,13 @@ Skip this phase entirely if `need_email` list is empty.
     sheetName="{attendee_sheet}"
     → Write per-row values:
        pc_status              = {status}
-       pc_email_source        = {original | hunter | none}
+       pc_email_source        = {original | hunter | guessed | none}
        pc_email_used          = {email address used, or blank if not_found}
        pc_draft_created_at    = {ISO timestamp when draft created, or blank}
        pc_sent_at             = {ISO timestamp when actually sent, or blank}
        pc_event               = {event_slug}
        pc_draft_id            = {draft_id or blank}
+       pc_resend_id           = {Resend email ID if direct send, or blank}
        pc_hunter_confidence   = {score or blank}
        pc_notes               = {error/skip reason or blank}
 
@@ -794,8 +924,22 @@ Skip if `send_mode = "direct"`.
     → body: summary table + draft IDs
     → required approver: {review_email} user
 
-6d. Post comment:
-    "{N} drafts created. Approval requested. Awaiting review before sending."
+6d. Send Paperclip inbox notification to reviewer (MANDATORY — always):
+    POST /api/issues/{PAPERCLIP_TASK_ID}/inbox
+    → to: {review_email} user
+    → subject: "[{event_name}] {N} drafts ready — Approve or Reject"
+    → body:
+      "{N} outreach emails drafted for {event_name} and saved to Outlook Drafts.
+       Review the drafts then Approve to send or Reject with a note."
+    → On failure: log warning in issue comment and continue — non-blocking.
+
+6e. Change issue status → in_review (MANDATORY):
+    PATCH /api/issues/{PAPERCLIP_TASK_ID}
+    body: { "status": "in_review" }
+    → On failure: log warning in issue comment and continue — non-blocking.
+
+6f. Post comment:
+    "{N} drafts created. Issue set to in_review. Inbox notification sent to {review_email}. Awaiting approval before sending."
 
     → NEXT: PHASE 7 — Await approval / rejection (issue stays open until decision received)
 ```
@@ -809,27 +953,38 @@ Skip if `send_mode = "direct"`.
 
 7b. Read draft IDs from approval body
 
-7c. For each row in this batch (read pc_email_used + composed body from memory or re-read draft):
+7c. ⚠️ MANDATORY SEND RULE — READ BEFORE PROCEEDING:
+    Emails MUST be sent via resend_send_email ONLY.
+    NEVER use outlook_send_message, outlook_send_draft, outlook_reply, or ANY Outlook tool to send.
+    Outlook drafts (created in Phase 4) are for PREVIEW ONLY — they must NEVER be used to deliver email.
+    Resend is the ONLY delivery mechanism. No exceptions.
+
+    For each row in this batch (read pc_email_used + composed body from memory or re-read draft):
     resend_send_email  (uses RESEND_API_KEY — no daily limit)
     → from: {outlook_user}
     → to: {pc_email_used}
     → subject: {composed_subject}
     → html: {composed_html}
-    → on success: note sent
+    → on success: capture returned Resend email ID → store as pc_resend_id
     → on error: note failure, continue others
 
-    Note: Outlook drafts created in Phase 4 are for preview only.
-    Resend is the actual delivery mechanism on approval.
-    Delete or ignore the Outlook draft after send.
+    After sending, delete or ignore the Outlook draft — it served its preview purpose.
 
-7d. sharepoint_excel_write_range
-    → For each sent row: pc_status = "sent", pc_sent_at = now ISO  (pc_draft_created_at unchanged)
-    → For any failed: pc_status = "send_failed", pc_notes = "{error}"
+7d. ⚠️ WRITE IMMEDIATELY after each individual send — do NOT batch:
+    sharepoint_excel_write_range for THIS row immediately after resend_send_email returns:
+    → pc_status    = "sent"
+    → pc_sent_at   = now ISO
+    → pc_resend_id = "{returned_resend_email_id}"  ← write NOW, not after all rows — PRE-CHECK A depends on this
+    → pc_draft_created_at unchanged
+    → NEVER write resend ID into pc_notes — pc_notes is for error messages only
+    → For failed send: pc_status = "send_failed", pc_notes = "{error_message_only}"
 
 7e. Post final comment:
     "All {N} emails sent for {event_name}. Excel updated."
 
-7f. Update issue → done
+7f. Change issue status → done:
+    PATCH /api/issues/{PAPERCLIP_TASK_ID}
+    body: { "status": "done" }
 
     → NEXT: PHASE 8 — Run log and summary
 ```
@@ -840,7 +995,9 @@ Skip if `send_mode = "direct"`.
 7g. Read rejection reason
 7h. sharepoint_excel_write_range → pc_status = "skipped", pc_notes = "{rejection reason}"
 7i. Post comment: "Approval rejected. Rows marked skipped. Reason: {reason}"
-7j. Update issue → done
+7j. Change issue status → done:
+    PATCH /api/issues/{PAPERCLIP_TASK_ID}
+    body: { "status": "done" }
 ```
 
 ---
@@ -904,7 +1061,11 @@ Skip if `send_mode = "direct"`.
       Issue: {PAPERCLIP_TASK_ID}
   If it fails → add "⚠️ Teams notification failed: {error_message}" to issue comment and continue.
 
-8c. Update issue → done (direct mode) or leave open awaiting approval (draft_review mode)
+8c. Status management:
+    direct mode     → PATCH /api/issues/{PAPERCLIP_TASK_ID} body: { "status": "done" }
+    draft_review mode → issue already set to in_review (done in PHASE 6).
+                        Status will be set to done by PHASE 7 on approval or rejection.
+                        Do NOT change status here in draft_review mode.
 
     ✓ PIPELINE COMPLETE.
 ```

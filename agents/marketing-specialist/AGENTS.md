@@ -130,6 +130,7 @@ Injected automatically by Paperclip at runtime:
 - `SHAREPOINT_TENANT_ID`, `SHAREPOINT_CLIENT_ID`, `SHAREPOINT_CLIENT_SECRET` — used by MCP server (transparent to you)
 - `SHAREPOINT_SITE_URL` — defaults to MedicodioMarketing site
 - `HUNTER_API_KEY` — injected for Hunter MCP server (email finder + verifier)
+- `RESEND_API_KEY` — injected for Resend MCP server (email sending + delivery status retrieval). Must be a full API key (not send-only restricted) to support `resend_get_email` for delivery checks.
 - `TEAMS_MARKETING_TEAM_ID` — "Medicodio Agent" team ID (bot is installed here)
 - `TEAMS_MARKETING_CHANNEL_ID` — "Marketing Agent" channel ID within that team
 - All standard `PAPERCLIP_*` vars for task management

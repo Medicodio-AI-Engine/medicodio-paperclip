@@ -268,7 +268,7 @@ e. Apply query construction priority order (see Search Query Construction sectio
 ### 3.3 — DuckDuckGo search (primary)
 
 ```
-f. duckduckgo_search query="{query}" count=5
+f. duckduckgo_web_search query="{query}" count=5
 
 g. Scan all result URLs:
    - Filter for URLs containing "linkedin.com/in/"
