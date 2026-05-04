@@ -41,18 +41,20 @@ Delegate to the onboarding routine reply-processing phases when a reply arrives.
 
 1. `sharepoint_read_file path="HR-Onboarding/audit-log.csv"`
    → Parse all rows (pipe-delimited CSV, skip header row)
-   → Filter rows where `current_status` NOT IN: `completed`, `cancelled`, `withdrawn`, `stalled`, `escalated`, `verified_by_human`, `sharepoint_upload_in_progress`, `uploaded_to_sharepoint`  
+   → Filter rows where `current_status` NOT IN: `completed`, `cancelled`, `withdrawn`, `stalled`, `escalated`, `verified_by_human`, `sharepoint_upload_in_progress`, `uploaded_to_sharepoint`, `hrms_form_submitted`  
    → For each active case, group rows by `case_id` and extract:
      - `employee_email`          (from any row for this `case_id`)
      - `employee_full_name`      (from any row for this `case_id`)
      - `employee_type`           (from `case_created` row)
-     - `case_id`                 (= `{employee_email}-{date_of_joining}`, from `case_created` row)
+     - `case_id`                 (from `case_created` row — format is `{employee_email}-{date_of_joining}` for onboarding cases, `fte-form-{employee_email}-{date_of_joining}` for intern_fte_form cases)
      - `date_of_joining`         (parse from `case_id` — everything after the last `-YYYY` prefix; format: `YYYY-MM-DD`)
      - `human_in_loop_email`     (from `case_created` row)
      - `recruiter_or_hr_name`    (from `case_created` row)
-     - `recruiter_or_hr_email`   (read from `HR-Onboarding/{employee_full_name} - {date_of_joining}/case-tracker.md` field `HR Contact Email`, or `null` if not present)
+     - `recruiter_or_hr_email`   (read from tracker file — for `intern_fte_form` cases: `fte-form-tracker.md` field `HR Contact Email`; for all others: `case-tracker.md` field `HR Contact Email`; `null` if file not present)
+     - `role`                    (for `intern_fte_form` cases only: read from `fte-form-tracker.md` field `Role`; not required for onboarding cases)
+     - `phone_number`            (for `intern_fte_form` cases only: read from `fte-form-tracker.md` field `Phone`; `null` if not present)
      - `current_status`          (from the most recent row for this `case_id`)
-     - `last_outbound_email_timestamp`  (timestamp of most recent `initial_email_sent` OR `reminder_1_sent` OR `reminder_2_sent` row)
+     - `last_outbound_email_timestamp`  (timestamp of most recent `initial_email_sent` OR `form_reprompt_sent` OR `reminder_1_sent` OR `reminder_2_sent` row)
      - `reminder_1_sent`         (`true` if a row with event=`reminder_1_sent` exists for this `case_id`, else `false`)
      - `reminder_2_sent`         (`true` if a row with event=`reminder_2_sent` exists for this `case_id`, else `false`)
      - `reminder_1_sent_timestamp`      (timestamp of `reminder_1_sent` row, if present)
@@ -63,7 +65,7 @@ Delegate to the onboarding routine reply-processing phases when a reply arrives.
    **TIMESTAMP GUARD:** For each case, if `last_outbound_email_timestamp` is missing, null, or unparseable:
    → Append to audit-log:
    ```
-   {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|heartbeat_skip|Skipped — timestamp missing or malformed|Cannot compute elapsed time
+   {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|heartbeat_skip|Skipped — timestamp missing or malformed|Cannot compute elapsed time|{paperclip_issue_id or —}
    ```
    → `outlook_send_email` to `{human_in_loop_email}`:
      - subject: `HR Alert: Cannot process case for {employee_full_name} — timestamp error`
@@ -73,7 +75,7 @@ Delegate to the onboarding routine reply-processing phases when a reply arrives.
 
 2. If no active cases → append to audit-log:
    ```
-   {now}|—|—|—|—|—|—|—|heartbeat_tick|No active cases|—
+   {now}|—|—|—|—|—|—|—|heartbeat_tick|No active cases|—|—
    ```
    → STOP
 
@@ -88,8 +90,10 @@ For each active case:
     → Collect **ALL** messages received AFTER `last_outbound_email_timestamp`, sorted chronologically (oldest first)
 
 3b. IF no results from 3a:
-    → `outlook_search_emails`  
-      query: `"subject:Onboarding Documents {employee_full_name}"`  
+    → subject query depends on employee_type:
+      - IF `employee_type` == `intern_fte_form`: query: `"subject:Review Your Onboarding Form {employee_full_name}"`
+      - ELSE: query: `"subject:Onboarding Documents {employee_full_name}"`
+    → `outlook_search_emails` with that query
       → Collect all messages received AFTER `last_outbound_email_timestamp`  
       → For each message: check if sender matches `employee_email` or `alternate_candidate_email`  
       → If message found from an unrecognized sender:
@@ -99,24 +103,51 @@ For each active case:
           - body: `<p>Hi,</p><p>A possible reply was detected for <strong>{employee_full_name}</strong> from an unrecognized email address (not {employee_email}). Please review and confirm if this is from the candidate.</p><p>Case ID: {case_id}</p><p>Regards,<br>HR Automation</p>`
         - Append to audit-log:
           ```
-          {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|reply_from_alternate_sender|Notified human — reply from unrecognized sender|Awaiting human confirmation
+          {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|reply_from_alternate_sender|Notified human — reply from unrecognized sender|Awaiting human confirmation|{paperclip_issue_id or —}
           ```
         - Do NOT auto-delegate to onboarding routine — needs human confirmation
         - Skip nudge for this tick; continue to next case
 
 4. IF one or more replies found (from step 3a or 3b):
-   → Process replies **in chronological order** (oldest first)  
+   → Process replies **in chronological order** (oldest first)
    → For each reply message:
+
+   **Route by employee_type:**
+
+   IF `employee_type` == `intern_fte_form`:
      - Append to audit-log:
        ```
-       {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|reply_detected|Delegating to onboarding routine Phase 4|messageId: {messageId}
+       {now}|{case_id}|{employee_email}|{employee_full_name}|intern_fte_form|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|reply_detected|Creating [INTERN-FTE-FORM] issue for reply processing|messageId: {messageId}|{paperclip_issue_id or —}
+       ```
+     - Create a new Paperclip issue (same pattern as onboarding):
+       ```
+       POST /api/companies/{PAPERCLIP_COMPANY_ID}/issues
+       {
+         "title": "[INTERN-FTE-FORM] {employee_full_name}",
+         "description": "source: api\nmessageId: {messageId}\ncase_id: {case_id}\nemployee_full_name: {employee_full_name}\nemployee_email: {employee_email}\nrole: {role}\nemployee_type: intern\ndate_of_joining: {date_of_joining}\nrecruiter_or_hr_name: {recruiter_or_hr_name}\nrecruiter_or_hr_email: {recruiter_or_hr_email}\nhuman_in_loop_email: {human_in_loop_email}\nphone_number: {phone_number}\ncurrent_status: {current_status}",
+         "assigneeAgentId": "{HR_AGENT_ID}",
+         "projectId": "{ONBOARDING_PROJECT_ID}",
+         "parentId": "{paperclip_issue_id}"
+       }
+       ```
+       → Agent picks it up via `[INTERN-FTE-FORM]` title prefix → reads `source: api` + `messageId` → jumps to Phase 4.
+     - If issue creation fails:
+       - `outlook_send_email` to `{human_in_loop_email}`:
+         - subject: `HR Alert: Failed to create form reply issue for {employee_full_name}`
+         - isHtml: true
+         - body: `<p>Hi,</p><p>The heartbeat detected a reply from <strong>{employee_full_name}</strong> but failed to create the processing issue.</p><p>Case ID: {case_id}<br>Message ID: {messageId}</p><p>Manual intervention is required.</p><p>Regards,<br>HR Automation</p>`
+
+   ELSE (standard onboarding case):
+     - Append to audit-log:
+       ```
+       {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|reply_detected|Delegating to onboarding routine Phase 4|messageId: {messageId}|{paperclip_issue_id or —}
        ```
      - Delegate to onboarding routine:
        ```
        POST /api/routines/ddedecdb-871a-4ad1-980b-5935a2ecda75/run
        {
          "source": "api",
-         "parentIssueId": "{paperclip_issue_id}",     // links execution issue as child of original onboarding issue; omit if null
+         "parentIssueId": "{paperclip_issue_id}",
          "payload": {
            "case_id": "{case_id}",
            "messageId": "{messageId}",
@@ -140,6 +171,7 @@ For each active case:
          - subject: `HR Alert: Failed to delegate reply for {employee_full_name}`
          - isHtml: true
          - body: `<p>Hi,</p><p>The heartbeat detected a reply from <strong>{employee_full_name}</strong> but failed to trigger the onboarding routine.</p><p>Case ID: {case_id}<br>Message ID: {messageId}</p><p>Manual intervention is required.</p><p>Regards,<br>HR Automation</p>`
+
    → Continue to next case (do NOT send nudge for any case that had replies)
 
 5. IF no reply found:
@@ -159,14 +191,14 @@ For each active case:
 7. IF `elapsed` < 24h:
    → Append to audit-log:
    ```
-   {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|heartbeat_tick|No action — within 24h window|{elapsed} elapsed
+   {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|heartbeat_tick|No action — within 24h window|{elapsed} elapsed|{paperclip_issue_id or —}
    ```
    → Skip this case
 
 8. IF `elapsed` ≥ 24h AND `current_status` = `stalled`:
    → Append to audit-log:
    ```
-   {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|stalled|heartbeat_tick|Already stalled — no action|—
+   {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|stalled|heartbeat_tick|Already stalled — no action|—|{paperclip_issue_id or —}
    ```
    → Skip this case
 
@@ -192,9 +224,16 @@ For each active case:
 11. `outlook_send_email`
     - to: `{employee_email}`
     - ccRecipients: `["{recruiter_or_hr_email}"]`
-    - subject: `Reminder: Pending Onboarding Documents – {employee_full_name}`
+    - subject: IF `employee_type` == `intern_fte_form`: `Reminder: Please Complete Your Onboarding Form – {employee_full_name}` ELSE: `Reminder: Pending Onboarding Documents – {employee_full_name}`
     - isHtml: true
-    - body:
+    - body: IF `employee_type` == `intern_fte_form`:
+      ```html
+      <p>Hi {employee_full_name},</p>
+      <p>This is a reminder to complete your HRMS onboarding form shared with you earlier.</p>
+      <p>Please open the form, fill in the remaining fields, and reply <strong>"done"</strong> at the earliest so we can proceed.</p>
+      <p>Regards,<br>{recruiter_or_hr_name}</p>
+      ```
+      ELSE:
       ```html
       <p>Hi {employee_full_name},</p>
       <p>This is a reminder to share your onboarding documents requested earlier.</p>
@@ -217,7 +256,7 @@ For each active case:
 
 13. Append to audit-log:
     ```
-    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|reminder_1_sent|Nudge 1 email sent to candidate|No reply after 24h
+    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|reminder_1_sent|Nudge 1 email sent to candidate|No reply after 24h|{paperclip_issue_id or —}
     ```
 
 14. Update issue comment: `"Nudge 1 sent to {employee_email} at {now}"`
@@ -229,9 +268,16 @@ For each active case:
 15. `outlook_send_email`
     - to: `{employee_email}`
     - ccRecipients: `["{recruiter_or_hr_email}"]`
-    - subject: `Urgent Reminder: Onboarding Documents Pending – {employee_full_name}`
+    - subject: IF `employee_type` == `intern_fte_form`: `Urgent Reminder: Please Complete Your Onboarding Form – {employee_full_name}` ELSE: `Urgent Reminder: Onboarding Documents Pending – {employee_full_name}`
     - isHtml: true
-    - body:
+    - body: IF `employee_type` == `intern_fte_form`:
+      ```html
+      <p>Hi {employee_full_name},</p>
+      <p>This is a final automated reminder to complete your HRMS onboarding form.</p>
+      <p>Please open the form, fill in the remaining fields, and reply <strong>"done"</strong> as soon as possible to avoid any delay in your onboarding.</p>
+      <p>Regards,<br>{recruiter_or_hr_name}</p>
+      ```
+      ELSE:
       ```html
       <p>Hi {employee_full_name},</p>
       <p>This is a follow-up regarding your pending onboarding documents.</p>
@@ -255,7 +301,7 @@ For each active case:
 
 17. Append to audit-log:
     ```
-    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|reminder_2_sent|Nudge 2 email sent to candidate|No reply after 48h — final automated reminder
+    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|reminder_2_sent|Nudge 2 email sent to candidate|No reply after 48h — final automated reminder|{paperclip_issue_id or —}
     ```
 
 18. Update issue comment: `"Nudge 2 sent to {employee_email} at {now}"`
@@ -278,7 +324,7 @@ For each active case:
         ```
     - Append to audit-log:
       ```
-      {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|stalled|case_stalled|Case marked stalled — no response after 2 reminders|Manual follow-up required
+      {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|stalled|case_stalled|Case marked stalled — no response after 2 reminders|Manual follow-up required|{paperclip_issue_id or —}
       ```
     - Update issue comment: `"Case stalled — no response after 2 reminders. Manual follow-up required."`
     - STOP automated actions for this case
@@ -286,7 +332,7 @@ For each active case:
     ELSE (`elapsed` < 24h since `reminder_2_sent_timestamp`):
     - Append to audit-log:
       ```
-      {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|heartbeat_tick|Waiting post-Nudge-2|{elapsed} elapsed since Nudge 2
+      {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|heartbeat_tick|Waiting post-Nudge-2|{elapsed} elapsed since Nudge 2|{paperclip_issue_id or —}
       ```
     - Skip this case
 
@@ -296,7 +342,7 @@ For each active case:
 
 20. After processing all cases, append to audit-log:
     ```
-    {now}|—|—|—|—|—|—|—|heartbeat_tick|Processed {N} active cases. Replies detected: {R}. Nudges sent: {X}. Cases stalled: {S}.|—
+    {now}|—|—|—|—|—|—|—|heartbeat_tick|Processed {N} active cases. Replies detected: {R}. Nudges sent: {X}. Cases stalled: {S}.|—|—
     ```
 
 ---
