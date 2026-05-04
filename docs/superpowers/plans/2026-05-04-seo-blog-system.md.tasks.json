@@ -1,0 +1,96 @@
+{
+  "planPath": "docs/superpowers/plans/2026-05-04-seo-blog-system.md",
+  "tasks": [
+    {
+      "id": 9,
+      "subject": "Task 1: mcp.json — MCP Server Config",
+      "status": "completed",
+      "description": "**Goal:** Wire all MCP servers for the seo-content-writer agent.\n\n**Files:**\n- Create: `agents/seo-content-writer/mcp.json`\n\n**Acceptance Criteria:**\n- [ ] Has sharepoint, outlook, duckduckgo, fetch, playwright, teams servers\n- [ ] OUTLOOK_MAILBOX env var wired\n- [ ] Matches marketing-specialist mcp.json structure\n\n```json:metadata\n{\"files\": [\"agents/seo-content-writer/mcp.json\"], \"verifyCommand\": \"cat agents/seo-content-writer/mcp.json | node -e \\\"JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')); console.log('VALID')\\\"\", \"acceptanceCriteria\": [\"Has all 6 MCP servers\", \"OUTLOOK_MAILBOX env var present\"]}\n```"
+    },
+    {
+      "id": 10,
+      "subject": "Task 2: AGENTS.md — Agent Identity + Phase Routing",
+      "status": "pending",
+      "blockedBy": [9],
+      "description": "**Goal:** Full agent instruction file with phase routing table, email rules, blog structure.\n\n**Files:**\n- Rewrite: `agents/seo-content-writer/AGENTS.md`\n\n```json:metadata\n{\"files\": [\"agents/seo-content-writer/AGENTS.md\"], \"acceptanceCriteria\": [\"Phase routing table maps all [BLOG-*] prefixes\", \"Email routing rules present\", \"All env vars listed\"]}\n```"
+    },
+    {
+      "id": 11,
+      "subject": "Task 3: bi-weekly-blog-post.md — Orchestrator Routine",
+      "status": "pending",
+      "blockedBy": [10],
+      "description": "**Goal:** Orchestrator reads issue description, bootstraps run folder, creates [BLOG-RESEARCH] child.\n\n**Files:**\n- Create: `agents/seo-content-writer/routines/bi-weekly-blog-post.md`\n- Create dir: `agents/seo-content-writer/routines/bi-weekly-blog-post/`\n\n```json:metadata\n{\"files\": [\"agents/seo-content-writer/routines/bi-weekly-blog-post.md\"], \"acceptanceCriteria\": [\"topic: line extraction\", \"duplicate check\", \"run-state.json schema complete\", \"[BLOG-RESEARCH] child creation\"]}\n```"
+    },
+    {
+      "id": 12,
+      "subject": "Task 4: research.md — SERP Research Phase",
+      "status": "pending",
+      "blockedBy": [11],
+      "description": "**Goal:** SERP research, competitor analysis, gap identification, create [BLOG-WRITE] child.\n\n**Files:**\n- Create: `agents/seo-content-writer/routines/bi-weekly-blog-post/research.md`\n\n```json:metadata\n{\"files\": [\"agents/seo-content-writer/routines/bi-weekly-blog-post/research.md\"], \"acceptanceCriteria\": [\"run_state_path extraction\", \"4 DuckDuckGo queries\", \"top 3 fetch\", \"run-state.json research section\", \"[BLOG-WRITE] child\"]}\n```"
+    },
+    {
+      "id": 13,
+      "subject": "Task 5: write.md — Blog Writing Phase",
+      "status": "pending",
+      "blockedBy": [11],
+      "description": "**Goal:** Write 1800-2500 word post from research, save draft.md, create [BLOG-SEO-CHECK] child.\n\n**Files:**\n- Create: `agents/seo-content-writer/routines/bi-weekly-blog-post/write.md`\n\n```json:metadata\n{\"files\": [\"agents/seo-content-writer/routines/bi-weekly-blog-post/write.md\"], \"acceptanceCriteria\": [\"research section read\", \"frontmatter in draft\", \"1800 word minimum gate\", \"[BLOG-SEO-CHECK] child\"]}\n```"
+    },
+    {
+      "id": 14,
+      "subject": "Task 6: seo-check.md — Keyword Scoring Phase",
+      "status": "pending",
+      "blockedBy": [11],
+      "description": "**Goal:** Score keywords from config.md cluster, auto-fix <5, gate on overall ≥70, create [BLOG-EMAIL] child.\n\n**Files:**\n- Create: `agents/seo-content-writer/routines/bi-weekly-blog-post/seo-check.md`\n\n```json:metadata\n{\"files\": [\"agents/seo-content-writer/routines/bi-weekly-blog-post/seo-check.md\"], \"acceptanceCriteria\": [\"config.md cluster load\", \"1-10 scoring\", \"auto-fix <5\", \"gate <70\", \"draft.md updated\", \"scorecard saved\"]}\n```"
+    },
+    {
+      "id": 15,
+      "subject": "Task 7: email.md — Approval Email Phase",
+      "status": "pending",
+      "blockedBy": [14],
+      "description": "**Goal:** Send approval email, store conversationId + messageId, set parent in_review, exit.\n\n**Files:**\n- Create: `agents/seo-content-writer/routines/bi-weekly-blog-post/email.md`\n\n```json:metadata\n{\"files\": [\"agents/seo-content-writer/routines/bi-weekly-blog-post/email.md\"], \"acceptanceCriteria\": [\"routing from category\", \"CC naveen always\", \"conversationId stored\", \"awaiting_reply status\", \"parent in_review\"]}\n```"
+    },
+    {
+      "id": 16,
+      "subject": "Task 8: revise.md — Revision Phase",
+      "status": "pending",
+      "blockedBy": [15],
+      "description": "**Goal:** Apply reviewer changes to draft.md, re-check SEO inline, reply to email thread, loop back to awaiting_reply.\n\n**Files:**\n- Create: `agents/seo-content-writer/routines/bi-weekly-blog-post/revise.md`\n\n```json:metadata\n{\"files\": [\"agents/seo-content-writer/routines/bi-weekly-blog-post/revise.md\"], \"acceptanceCriteria\": [\"reply_message_id in description\", \"max revision block\", \"draft.md updated\", \"inline SEO check\", \"thread reply sent\"]}\n```"
+    },
+    {
+      "id": 17,
+      "subject": "Task 9: publish.md — Publish Phase",
+      "status": "pending",
+      "blockedBy": [16],
+      "description": "**Goal:** Convert draft to Portable Text, POST to /api/blog/push, save publishResponseId, create [BLOG-AUDIT] child.\n\n**Files:**\n- Create: `agents/seo-content-writer/routines/bi-weekly-blog-post/publish.md`\n\n```json:metadata\n{\"files\": [\"agents/seo-content-writer/routines/bi-weekly-blog-post/publish.md\"], \"acceptanceCriteria\": [\"publish_queued guard\", \"md-to-portable-text.js invocation\", \"POST to /api/blog/push\", \"publishResponseId captured\", \"[BLOG-AUDIT] child\"]}\n```"
+    },
+    {
+      "id": 18,
+      "subject": "Task 10: audit.md — Final Log + Close Parent",
+      "status": "pending",
+      "blockedBy": [17],
+      "description": "**Goal:** Write audit.md, update config.md posted log, clear activeRunFolder, close parent issue.\n\n**Files:**\n- Create: `agents/seo-content-writer/routines/bi-weekly-blog-post/audit.md`\n\n```json:metadata\n{\"files\": [\"agents/seo-content-writer/routines/bi-weekly-blog-post/audit.md\"], \"acceptanceCriteria\": [\"audit.md full summary\", \"config.md posted_log updated\", \"activeRunFolder cleared\", \"parent issue closed\"]}\n```"
+    },
+    {
+      "id": 19,
+      "subject": "Task 11: email-monitor.md — Reply Monitoring Routine",
+      "status": "pending",
+      "blockedBy": [11],
+      "description": "**Goal:** 6-hour cron that checks inbox for replies, creates [BLOG-REVISE] or [BLOG-PUBLISH] sub-issue.\n\n**Files:**\n- Create: `agents/seo-content-writer/routines/email-monitor.md`\n\n```json:metadata\n{\"files\": [\"agents/seo-content-writer/routines/email-monitor.md\"], \"acceptanceCriteria\": [\"activeRunFolder empty exit\", \"awaiting_reply check\", \"conversationId filter\", \"OOO skip\", \"BLOG-REVISE creation\", \"BLOG-PUBLISH creation\", \"start over handling\"]}\n```"
+    },
+    {
+      "id": 20,
+      "subject": "Task 12: scripts/md-to-portable-text.js — Markdown Converter",
+      "status": "completed",
+      "blockedBy": [9],
+      "description": "**Goal:** Node.js CLI that converts markdown to Sanity Portable Text JSON array.\n\n**Files:**\n- Create: `scripts/md-to-portable-text.js`\n\n**Verify:** `echo '# Hello\\n\\n**bold**' > /tmp/t.md && node scripts/md-to-portable-text.js /tmp/t.md | node -e \"JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')); console.log('VALID JSON')\"`\n\n```json:metadata\n{\"files\": [\"scripts/md-to-portable-text.js\"], \"verifyCommand\": \"echo '# Hello' > /tmp/t.md && node scripts/md-to-portable-text.js /tmp/t.md | node -e \\\"JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')); console.log('VALID JSON')\\\"\", \"acceptanceCriteria\": [\"argv[2] input\", \"valid JSON output\", \"H1-H6 headings\", \"inline marks\", \"frontmatter stripped\"]}\n```"
+    },
+    {
+      "id": 21,
+      "subject": "Task 13: Verify all files and final clean-up",
+      "status": "pending",
+      "blockedBy": [18, 19, 20],
+      "description": "**Goal:** Verify all 12 agent files present, remove old phases/ dir, final git status clean.\n\n**Verify:** `find agents/seo-content-writer -type f | sort && git status`\n\n```json:metadata\n{\"files\": [], \"verifyCommand\": \"find agents/seo-content-writer -type f | sort && git status\", \"acceptanceCriteria\": [\"12 files present\", \"no phases/ directory\", \"git status clean\"]}\n```"
+    }
+  ],
+  "lastUpdated": "2026-05-04T00:00:00Z"
+}

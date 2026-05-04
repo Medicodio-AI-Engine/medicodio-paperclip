@@ -19,7 +19,7 @@ try {
 }
 
 // Strip frontmatter (--- ... ---)
-const fmMatch = markdown.match(/^---\n[\s\S]*?\n---\n/);
+const fmMatch = markdown.match(/^---\r?\n[\s\S]*?\r?\n---(\r?\n|$)/);
 const clean = fmMatch ? markdown.slice(fmMatch[0].length) : markdown;
 
 try {
@@ -135,7 +135,7 @@ function parseInline(text, blockKey) {
     if (match[1]) {
       linkCounter++;
       const lk = `${blockKey}link${linkCounter}`;
-      markDefs.push({ _type: 'link', _key: lk, href: match[3], blank: true });
+      markDefs.push({ _type: 'link', _key: lk, href: match[3] });
       children.push({ _type: 'span', _key: ck, text: match[2], marks: [lk] });
     } else if (match[4]) {
       children.push({ _type: 'span', _key: ck, text: match[4], marks: ['strong', 'em'] });
@@ -144,7 +144,7 @@ function parseInline(text, blockKey) {
     } else if (match[6]) {
       children.push({ _type: 'span', _key: ck, text: match[6], marks: ['em'] });
     } else if (match[7]) {
-      children.push({ _type: 'span', _key: ck, text: match[7], marks: ['strike-through'] });
+      children.push({ _type: 'span', _key: ck, text: match[7], marks: ['strike'] });
     } else if (match[8]) {
       children.push({ _type: 'span', _key: ck, text: match[8], marks: ['code'] });
     } else if (match[9]) {
