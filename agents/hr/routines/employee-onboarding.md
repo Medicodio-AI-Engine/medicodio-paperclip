@@ -27,7 +27,7 @@
 1. Check `PAPERCLIP_WAKE_PAYLOAD_JSON` env var first. If present, parse it and extract the `payload` field — all employee data lives there when fired by heartbeat or API.
 2. If `PAPERCLIP_WAKE_PAYLOAD_JSON` is absent or has no `payload`, call `GET /api/issues/{PAPERCLIP_TASK_ID}/heartbeat-context` and extract employee fields from the run payload embedded in the context.
 3. If still no employee data found, scan the issue body for `employee_full_name:`, `employee_email:` etc. key-value lines.
-4. If none of the above yield the required fields → post blocked comment listing missing fields, notify `karthik.r@medicodio.ai`, STOP.
+4. If none of the above yield the required fields → post blocked comment listing missing fields, notify `human_in_loop_email` (or escalate via chain of command if that is also missing), STOP.
 
 **Never assume the issue description contains employee data.** Paperclip creates execution issues with the routine's static description — employee data comes from the run payload.
 
@@ -476,6 +476,19 @@ Step 25a. Teams notification (non-blocking):
       <br>
       Proceeding to validation.
   If it fails → add "⚠️ Teams notification failed: {error}" to issue comment and continue.
+
+Step 25b. Upload all received attachments to Raw Submissions (BEFORE validation):
+  For each attachment from outlook_list_attachments:
+    sharepoint_transfer_from_outlook
+      messageId    = "{messageId}"
+      attachmentId = "{attachmentId}"
+      destPath     = "HR-Onboarding/{employee_full_name} - {date_of_joining}/01_Raw_Submissions/{filename}"
+      mimeType     = "{detected MIME type}"
+    → On HTTP 429 or 503: wait 10 s, retry up to 3 times. On 3rd failure: log warning in issue comment, skip file — do NOT stop validation.
+    → After transfer: sharepoint_get_file_info on destPath — confirm size > 0. If size = 0 or not found: log warning, continue.
+    → If a file with the same name already exists (resubmission): append timestamp suffix before extension — e.g. Aadhaar_2026-04-23T09-15-00Z.pdf
+  Post issue comment: "Raw upload complete — {N} file(s) saved to 01_Raw_Submissions."
+  → This step preserves the original bytes before any validation logic runs. Phase 9 skips re-uploading raw files already transferred here.
 ```
 
 ---
@@ -695,12 +708,41 @@ Step 36. For each new reply from candidate (entered via Phase 4):
     - If better copy received, keep latest valid version
     - If duplicate filename, append timestamp suffix (do not silently overwrite):
       e.g. Aadhaar_2026-04-23T09-15-00Z.pdf
-    - If all mandatory docs now present and valid → set status = complete_submission_received → proceed to Phase 8
+    - If all mandatory docs now present and valid → set status = complete_submission_received → run Step 36a, then proceed to Phase 8
     - If still partial → set status = partial_submission_received
       → Append to audit-log.csv (CSV append pattern):
         {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|partial_submission_received|partial_submission_received|Still waiting on {N} documents|{list of still-missing items}
       → Return to Phase 6 (discrepancy handling) to send updated resubmission request
       → Heartbeat will detect next reply and re-enter at Phase 4
+
+Step 36a. Auto-upload all validated documents to Verified Documents (runs only when all mandatory docs are present and clean):
+  For each document in the validated + accepted set:
+
+    STEP 36a-i — Resolve (messageId, attachmentId):
+    - If processed in Phase 5 of THIS run → use messageId + attachmentId already in context.
+    - If accepted in a PREVIOUS run → read case-tracker.md Attachment Lookup table,
+      find MOST RECENT row where Filename = {filename}, extract messageId + attachmentId.
+
+    STEP 36a-ii — Transfer to Verified Documents:
+    sharepoint_transfer_from_outlook
+      messageId    = "{messageId}"
+      attachmentId = "{attachmentId}"
+      destPath     = "HR-Onboarding/{employee_full_name} - {date_of_joining}/02_Verified_Documents/{filename}"
+      mimeType     = "{detected MIME type}"
+    → On HTTP 429 or 503: wait 10 s, retry up to 3 times. On 3rd failure → escalate (notify human_in_loop_email, append escalated row to audit-log, continue to next file).
+
+    STEP 36a-iii — Post-upload integrity check:
+    sharepoint_get_file_info
+      filePath="HR-Onboarding/{employee_full_name} - {date_of_joining}/02_Verified_Documents/{filename}"
+    → If size = 0 or not found → delete empty file, escalate, continue.
+
+  After all files transferred:
+  → Append to audit-log.csv (CSV append pattern):
+    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|complete_submission_received|files_uploaded|Verified documents auto-uploaded to 02_Verified_Documents|{N} files
+  → Update case-tracker Document Tracker: status = "uploaded" for all verified docs
+  → Add row to Status History: | {now} | complete_submission_received | {N} verified docs uploaded to 02_Verified_Documents |
+  → Post issue comment: "All documents validated and uploaded to 02_Verified_Documents ({N} files). Proceeding to human verification."
+  → Phase 9 Step 46 will SKIP verified upload (already done here).
 ```
 
 ---
@@ -770,7 +812,10 @@ Step 44. Set status = sharepoint_upload_in_progress
 Step 45. Append to audit-log.csv (CSV append pattern):
     {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|sharepoint_upload_in_progress|human_approved|Human approved — SharePoint upload started|—
 
-Step 46. For each verified document, follow this exact sequence:
+Step 46. Verified documents — SKIP (already uploaded in Phase 7 Step 36a):
+    Verified docs were transferred to 02_Verified_Documents immediately after validation passed (Step 36a).
+    Do NOT re-upload verified files here.
+    → If for any reason 02_Verified_Documents is empty (e.g. Step 36a failed mid-run), run the full 46a–46c sequence below as a fallback:
 
     STEP 46a — Resolve (messageId, attachmentId) for this file:
     - If processed in Phase 5 of THIS run → use messageId + attachmentId already in context.
@@ -793,9 +838,9 @@ Step 46. For each verified document, follow this exact sequence:
     → Confirm returned size > 0.
     → If size = 0 or file not found → delete the empty file, escalate via Step 49.
 
-Step 47. For each raw submission file, apply the identical 46a–46c sequence:
-    Target destPath: "HR-Onboarding/{employee_full_name} - {date_of_joining}/01_Raw_Submissions/{filename}"
-    Use sharepoint_transfer_from_outlook (same single-call pattern — NOT outlook_read_attachment + sharepoint_upload_binary)
+Step 47. Raw submissions — SKIP (already uploaded in Phase 4 Step 25b):
+    Raw files were transferred to 01_Raw_Submissions immediately on receipt, before validation.
+    Do NOT re-upload raw files here. Proceed directly to Step 48.
 
 Step 48. If any discrepancy notes exist:
     sharepoint_write_file
@@ -804,7 +849,7 @@ Step 48. If any discrepancy notes exist:
 Step 49. Escalation on any unrecoverable failure (download, validation, or upload):
     → set status = escalated
     → Append to audit-log.csv (CSV append pattern):
-      {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|escalated|escalated|Phase 9 failure after retries|Path: {path} Stage: {46b|46c|46d|46e} Error: {error}
+      {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|escalated|escalated|Phase 9 failure after retries|Path: {path} Stage: {46a|46b|46c} Error: {error}
     → outlook_send_email to human_in_loop_email:
       subject: "HR Alert: SharePoint upload failure — {employee_full_name}"
       body: folder path, filename, failure stage, error detail, files successfully uploaded so far
