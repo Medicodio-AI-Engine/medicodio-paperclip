@@ -55,10 +55,13 @@ Step 0. Read PAPERCLIP_WAKE_PAYLOAD_JSON → payload.
       date_of_joining, role, recruiter_or_hr_name, recruiter_or_hr_email,
       human_in_loop_email, phone_number, current_status
     → Recover excel_url:
-        sharepoint_get_file_info
-          filePath = "HR-Onboarding/{employee_full_name} - {date_of_joining}/EmployeeSheet_{employee_full_name}.xlsx"
-        → store webUrl as {excel_url}
-        → If file not found: notify human_in_loop_email, STOP.
+        IF payload contains non-empty `excel_url` field:
+          → use it directly as {excel_url} — skip sharepoint_get_file_info
+        ELSE:
+          sharepoint_get_file_info
+            filePath = "HR-Onboarding/{employee_full_name} - {date_of_joining}/EmployeeSheet_{employee_full_name}.xlsx"
+          → store webUrl as {excel_url}
+          → If file not found: notify human_in_loop_email, STOP.
     → Jump directly to PHASE 4. Do NOT copy template, read docs, fill Excel, or re-send email.
 
   ELSE: This is a fresh trigger — proceed to Step 1.

@@ -53,6 +53,7 @@ Delegate to the onboarding routine reply-processing phases when a reply arrives.
      - `recruiter_or_hr_email`   (read from tracker file — for `intern_fte_form` cases: `fte-form-tracker.md` field `HR Contact Email`; for all others: `case-tracker.md` field `HR Contact Email`; `null` if file not present)
      - `role`                    (for `intern_fte_form` cases only: read from `fte-form-tracker.md` field `Role`; not required for onboarding cases)
      - `phone_number`            (for `intern_fte_form` cases only: read from `fte-form-tracker.md` field `Phone`; `null` if not present)
+     - `excel_url`               (for `intern_fte_form` cases only: read from `fte-form-tracker.md` field `Form URL`; `null` if not present — Phase 0 falls back to path reconstruction if null)
      - `current_status`          (from the most recent row for this `case_id`)
      - `last_outbound_email_timestamp`  (timestamp of most recent `initial_email_sent` OR `form_reprompt_sent` OR `reminder_1_sent` OR `reminder_2_sent` row)
      - `reminder_1_sent`         (`true` if a row with event=`reminder_1_sent` exists for this `case_id`, else `false`)
@@ -124,7 +125,7 @@ For each active case:
        POST /api/companies/{PAPERCLIP_COMPANY_ID}/issues
        {
          "title": "[INTERN-FTE-FORM] {employee_full_name}",
-         "description": "source: api\nmessageId: {messageId}\ncase_id: {case_id}\nemployee_full_name: {employee_full_name}\nemployee_email: {employee_email}\nrole: {role}\nemployee_type: intern\ndate_of_joining: {date_of_joining}\nrecruiter_or_hr_name: {recruiter_or_hr_name}\nrecruiter_or_hr_email: {recruiter_or_hr_email}\nhuman_in_loop_email: {human_in_loop_email}\nphone_number: {phone_number}\ncurrent_status: {current_status}",
+         "description": "source: api\nmessageId: {messageId}\ncase_id: {case_id}\nemployee_full_name: {employee_full_name}\nemployee_email: {employee_email}\nrole: {role}\nemployee_type: intern\ndate_of_joining: {date_of_joining}\nrecruiter_or_hr_name: {recruiter_or_hr_name}\nrecruiter_or_hr_email: {recruiter_or_hr_email}\nhuman_in_loop_email: {human_in_loop_email}\nphone_number: {phone_number}\nexcel_url: {excel_url or (omit line if null)}\ncurrent_status: {current_status}",
          "assigneeAgentId": "{HR_AGENT_ID}",
          "projectId": "{ONBOARDING_PROJECT_ID}",
          "parentId": "{paperclip_issue_id}"
