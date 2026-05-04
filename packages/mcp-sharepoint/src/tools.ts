@@ -171,6 +171,33 @@ export function createToolDefinitions(client: SharepointClient): ToolDefinition[
       client,
     ),
 
+    // ── Download binary ───────────────────────────────────────────────────────
+    makeTool(
+      "sharepoint_download_binary",
+      "Download a binary file (PDF, image, DOCX, etc.) from SharePoint and return its base64-encoded content and MIME type. Use this when you need to visually inspect images or extract text from PDFs stored in SharePoint — same as outlook_read_attachment but for SharePoint files.",
+      z.object({
+        filePath: z.string().describe(filePathDesc),
+        driveId: driveIdOpt,
+      }),
+      async ({ filePath, driveId }) => client.downloadBinary(filePath, driveId),
+      client,
+    ),
+
+    // ── Copy file ─────────────────────────────────────────────────────────────
+    makeTool(
+      "sharepoint_copy_file",
+      "Copy a file to a different folder (optionally renaming it). Uses the Graph async copy API — polls until complete. Use this to copy template files before editing them.",
+      z.object({
+        sourcePath: z.string().describe("Path of the file to copy, e.g. 'hr-onboarding/templates/form.xlsx'"),
+        destFolderPath: z.string().default("").describe("Destination folder path (empty = drive root)"),
+        newName: z.string().describe("Name for the copied file, e.g. 'EmployeeSheet_Jane_Doe.xlsx'"),
+        driveId: driveIdOpt,
+      }),
+      async ({ sourcePath, destFolderPath, newName, driveId }) =>
+        client.copyItem(sourcePath, destFolderPath, newName, driveId),
+      client,
+    ),
+
     // ── Excel: list sheets ────────────────────────────────────────────────────
     makeTool(
       "sharepoint_excel_list_sheets",

@@ -421,6 +421,129 @@ export class SharepointClient {
     );
   }
 
+  // ── Download binary ───────────────────────────────────────────────────────────
+  // Returns base64-encoded content + mimeType so the agent can visually inspect
+  // images and PDFs stored in SharePoint (same pattern as outlook_read_attachment).
+
+  async downloadBinary(filePath: string, driveId?: string): Promise<{ contentBase64: string; mimeType: string; size: number; name: string }> {
+    const siteId = await this.getSiteId();
+    const dId = driveId ?? (await this.getDefaultDriveId());
+    const encoded = encodeURIComponent(filePath).replace(/%2F/g, "/");
+
+    // Get metadata first for mimeType and name
+    const meta = await this.request<DriveItem>("GET", `/sites/${siteId}/drives/${dId}/root:/${encoded}`);
+    const mimeType = meta.file?.mimeType ?? "application/octet-stream";
+
+    // Download raw bytes
+    const token = await this.getAccessToken();
+    const url = `${GRAPH_BASE}/sites/${siteId}/drives/${dId}/root:/${encoded}:/content`;
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      let errBody: unknown;
+      try { errBody = await res.json(); } catch { errBody = await res.text(); }
+      throw new SharepointApiError(res.status, "GET", url, errBody);
+    }
+    const bytes = Buffer.from(await res.arrayBuffer());
+    return {
+      contentBase64: bytes.toString("base64"),
+      mimeType,
+      size: bytes.length,
+      name: meta.name,
+    };
+  }
+
+  // ── Copy item ─────────────────────────────────────────────────────────────────
+  // Uses the Graph async copy endpoint. Polls the monitor URL until complete.
+
+  async copyItem(
+    sourcePath: string,
+    destFolderPath: string,
+    newName: string,
+    driveId?: string,
+  ): Promise<DriveItem> {
+    const siteId = await this.getSiteId();
+    const dId = driveId ?? (await this.getDefaultDriveId());
+
+    // Resolve source item id
+    const srcEncoded = encodeURIComponent(sourcePath).replace(/%2F/g, "/");
+    const srcItem = await this.request<DriveItem>(
+      "GET",
+      `/sites/${siteId}/drives/${dId}/root:/${srcEncoded}`,
+    );
+
+    // Resolve destination folder id
+    let destParentId: string;
+    if (!destFolderPath || destFolderPath === "" || destFolderPath === "/") {
+      const root = await this.request<DriveItem>("GET", `/sites/${siteId}/drives/${dId}/root`);
+      destParentId = root.id;
+    } else {
+      const destEncoded = encodeURIComponent(destFolderPath).replace(/%2F/g, "/");
+      const destItem = await this.request<DriveItem>(
+        "GET",
+        `/sites/${siteId}/drives/${dId}/root:/${destEncoded}`,
+      );
+      destParentId = destItem.id;
+    }
+
+    // POST copy — returns 202 + Location header
+    const token = await this.getAccessToken();
+    const copyUrl = `${GRAPH_BASE}/sites/${siteId}/drives/${dId}/items/${srcItem.id}/copy`;
+    const copyRes = await fetch(copyUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Prefer: "respond-async",
+      },
+      body: JSON.stringify({
+        parentReference: { driveId: dId, id: destParentId },
+        name: newName,
+      }),
+    });
+
+    if (copyRes.status !== 202) {
+      let errBody: unknown;
+      try { errBody = await copyRes.json(); } catch { errBody = await copyRes.text(); }
+      throw new SharepointApiError(copyRes.status, "POST", copyUrl, errBody);
+    }
+
+    const monitorUrl = copyRes.headers.get("Location");
+    if (!monitorUrl) throw new Error("sharepoint_copy_file: no Location header in 202 response");
+
+    // Poll monitor URL until complete (max 30 attempts × 2 s = 60 s)
+    for (let attempt = 0; attempt < 30; attempt++) {
+      await new Promise(r => setTimeout(r, 2000));
+      const pollToken = await this.getAccessToken();
+      const pollRes = await fetch(monitorUrl, {
+        headers: { Authorization: `Bearer ${pollToken}` },
+      });
+      if (!pollRes.ok) {
+        let errBody: unknown;
+        try { errBody = await pollRes.json(); } catch { errBody = await pollRes.text(); }
+        throw new SharepointApiError(pollRes.status, "GET", monitorUrl, errBody);
+      }
+      const status = await pollRes.json() as {
+        status: string;
+        resourceLocation?: string;
+        error?: { message: string };
+      };
+      if (status.status === "completed" && status.resourceLocation) {
+        const loc = status.resourceLocation.includes("?")
+          ? `${status.resourceLocation}&$select=id,name,size,webUrl,file,parentReference,lastModifiedDateTime`
+          : `${status.resourceLocation}?$select=id,name,size,webUrl,file,parentReference,lastModifiedDateTime`;
+        return this.request<DriveItem>("GET", loc);
+      }
+      if (status.status === "failed") {
+        throw new Error(`sharepoint_copy_file: copy failed — ${status.error?.message ?? "unknown"}`);
+      }
+      // status is "inProgress" or "notStarted" — keep polling
+    }
+    throw new Error("sharepoint_copy_file: timed out waiting for copy to complete (60 s)");
+  }
+
   // ── Excel (Workbook) API ──────────────────────────────────────────────────────
 
   private async getItemId(filePath: string, driveId?: string): Promise<{ itemId: string; dId: string; siteId: string }> {
