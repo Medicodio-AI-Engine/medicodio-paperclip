@@ -189,17 +189,30 @@ Fires **manually** — triggered by creating a Paperclip issue with `event_slug:
 
 Full step-by-step instructions: [`routines/event-outreach.md`](routines/event-outreach.md)
 
-**Summary of what you do each run:**
-1. PRE-CHECK A — delivery status: check Outlook bounces for rows sent >24hrs ago, update Excel
-2. PRE-CHECK B — reply check: scan inbox for replies, classify intent, notify on demo interest
-3. Read `Marketing-Specialist/event-outreach/{event_slug}/config.md` from SharePoint
-4. Load attendee Excel, auto-detect column map on first run (cached to `column-map.md`)
-5. Split batch: has email vs missing email
-6. For missing emails: DuckDuckGo → domain → `hunter_find_email` → fallback `hunter_search_domain` → `hunter_verify_email`
-7. Sufficiency check — send if threshold met
-8. Send/draft emails using `email-template.html` from SharePoint (all placeholders replaced)
-9. Write 16 audit columns back to Excel
-10. Notify reviewer if `send_mode: draft_review`
+**Pipeline (child issue per phase — each phase = fresh heartbeat):**
+1. `[EO-ORCHESTRATOR]` — read config, write run-state.json, create first child
+2. `[EO-PRE-CHECK-A]` — delivery status via `resend_get_email`
+3. `[EO-PRE-CHECK-B]` — inbox reply scan via `outlook_list_messages`
+4. `[EO-BATCH-LOADER]` — load batch + column map, split has_email vs need_email
+5. `[EO-ENRICHER]` — Hunter enrichment: `WebSearch` FIRST (built-in) → DDG fallback → `hunter_find_email` → `hunter_search_domain` → `hunter_verify_email`
+6. `[EO-SENDER]` — sufficiency check + compose + send via `resend_send_email`
+7. `[EO-AUDITOR]` — audit write + run log + close parent
+
+**Phase routing — MANDATORY:** When assigned any `[EO-*]` issue, read the mapped phase file FIRST:
+
+| Title prefix | Read this file |
+|---|---|
+| `[EO-ORCHESTRATOR]` | `routines/event-outreach.md` |
+| `[EO-PRE-CHECK-A]` | `routines/event-outreach/pre-check-a.md` |
+| `[EO-PRE-CHECK-B]` | `routines/event-outreach/pre-check-b.md` |
+| `[EO-BATCH-LOADER]` | `routines/event-outreach/batch-loader.md` |
+| `[EO-ENRICHER]` | `routines/event-outreach/enricher.md` |
+| `[EO-SENDER]` | `routines/event-outreach/sender.md` |
+| `[EO-AUDITOR]` | `routines/event-outreach/auditor.md` |
+
+Read the mapped file immediately on checkout. Do not combine steps from multiple phase files in one heartbeat.
+
+**State:** Each phase reads and writes `run-state.json` at `Marketing-Specialist/event-outreach/{event_slug}/run-state.json`. All row data for the batch is in run-state.json — do NOT re-read Excel for batch data after batch-loader completes.
 
 **Concurrency:** `skip_if_active` — one event run at a time.
 
