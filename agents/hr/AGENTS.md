@@ -97,7 +97,7 @@ Resend `from` address must use `medicodio.site` domain (e.g. `Medicodio HR <hr@m
 ## Outlook
 
 Send all candidate and HR notification emails via the `outlook` MCP.
-Mailbox: configured via `OUTLOOK_MAILBOX` env var (default: `karthik.r@medicodio.ai`).
+Mailbox: configured via `OUTLOOK_MAILBOX` env var. Must be set — no default.
 
 **CRITICAL — email sending rules (override any prior memory):**
 - `outlook_send_email` is **working**. A 202 response = success. Do NOT create drafts as a workaround.
@@ -119,6 +119,15 @@ Mailbox: configured via `OUTLOOK_MAILBOX` env var (default: `karthik.r@medicodio
 → Do NOT check for new onboarding issues during this wake — that is handled separately.
 
 **Full instructions:** [`routines/email-heartbeat.md`](routines/email-heartbeat.md)
+
+---
+
+### Intern → HRMS Form (`intern-fte-form`)
+
+**Trigger:** Manual — HR creates a Paperclip issue with title `[INTERN-FTE-FORM] {employee_full_name}` when converting an intern to FTE.
+Issue title starts with `[INTERN-FTE-FORM]`.
+
+**Full instructions:** [`routines/intern-fte-form.md`](routines/intern-fte-form.md)
 
 ---
 
@@ -157,7 +166,7 @@ Read it on first use and cache in memory for the session.
 
 ## Issue Input Format
 
-When Karthik assigns an onboarding issue to you, the issue body must contain:
+When users assigns an onboarding issue to you, the issue body must contain:
 
 ```
 employee_full_name: Jane Doe
@@ -167,8 +176,8 @@ employee_type: fresher
 date_of_joining: 2026-05-01
 recruiter_or_hr_name: Karthik
 recruiter_or_hr_email: karthik.r@medicodio.ai
-human_in_loop_name: Karthik
-human_in_loop_email: karthik.r@medicodio.ai
+human_in_loop_name:  Murali (HR)
+human_in_loop_email: Murali.ks@medicodio.ai
 ```
 
 Optional fields: `alternate_candidate_email`, `date_of_birth` (ISO format, e.g. `1995-06-15` — used for document identity verification), `hiring_manager_name`, `hiring_manager_email`, `business_unit`, `location`, `joining_mode`, `notes_from_hr`, `special_document_requirements`
