@@ -2,6 +2,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { normalizeAdapterConfigPaths } from "../services/heartbeat.js";
 import { resolveRepoRoot, toRelativeIfPossible, resolveFromRepoRoot } from "../utils/repo-root.js";
+import { resolveManagedInstructionsRoot } from "../services/agent-instructions.js";
 
 // ---------------------------------------------------------------------------
 // repo-root.ts
@@ -161,5 +162,80 @@ describe("normalizeAdapterConfigPaths", () => {
     normalizeAdapterConfigPaths(input);
     expect(input.cwd).toBe(".");
     expect(input.extraArgs[1]).toBe("agents/hr/mcp.json");
+  });
+
+  describe("managed instructions bundle recomputation", () => {
+    const agent = { id: "agent-abc", companyId: "company-xyz" };
+
+    it("recomputes instructionsRootPath and instructionsFilePath from current instance root", () => {
+      const staleRoot = "/Users/old-user/some-other-machine/.paperclip/instances/default/companies/company-xyz/agents/agent-abc/instructions";
+      const result = normalizeAdapterConfigPaths(
+        {
+          instructionsBundleMode: "managed",
+          instructionsRootPath: staleRoot,
+          instructionsEntryFile: "AGENTS.md",
+          instructionsFilePath: path.join(staleRoot, "AGENTS.md"),
+        },
+        agent,
+      );
+      const expectedRoot = resolveManagedInstructionsRoot(agent);
+      expect(result.instructionsRootPath).toBe(expectedRoot);
+      expect(result.instructionsFilePath).toBe(path.resolve(expectedRoot, "AGENTS.md"));
+    });
+
+    it("uses instructionsEntryFile when resolving instructionsFilePath", () => {
+      const staleRoot = "/Users/old-user/.paperclip/instances/default/companies/company-xyz/agents/agent-abc/instructions";
+      const result = normalizeAdapterConfigPaths(
+        {
+          instructionsBundleMode: "managed",
+          instructionsRootPath: staleRoot,
+          instructionsEntryFile: "CUSTOM.md",
+          instructionsFilePath: path.join(staleRoot, "CUSTOM.md"),
+        },
+        agent,
+      );
+      const expectedRoot = resolveManagedInstructionsRoot(agent);
+      expect(result.instructionsFilePath).toBe(path.resolve(expectedRoot, "CUSTOM.md"));
+    });
+
+    it("skips recomputation when no agent is provided", () => {
+      const staleRoot = "/Users/old-user/.paperclip/instances/default/companies/company-xyz/agents/agent-abc/instructions";
+      const result = normalizeAdapterConfigPaths({
+        instructionsBundleMode: "managed",
+        instructionsRootPath: staleRoot,
+        instructionsEntryFile: "AGENTS.md",
+        instructionsFilePath: path.join(staleRoot, "AGENTS.md"),
+      });
+      expect(result.instructionsRootPath).toBe(staleRoot);
+    });
+
+    it("recomputes even when instructionsRootPath and instructionsFilePath are empty strings", () => {
+      const result = normalizeAdapterConfigPaths(
+        {
+          instructionsBundleMode: "managed",
+          instructionsRootPath: "",
+          instructionsEntryFile: "AGENTS.md",
+          instructionsFilePath: "",
+        },
+        agent,
+      );
+      const expectedRoot = resolveManagedInstructionsRoot(agent);
+      expect(result.instructionsRootPath).toBe(expectedRoot);
+      expect(result.instructionsFilePath).toBe(path.resolve(expectedRoot, "AGENTS.md"));
+    });
+
+    it("skips recomputation when mode is not managed", () => {
+      const externalRoot = "/some/external/path";
+      const result = normalizeAdapterConfigPaths(
+        {
+          instructionsBundleMode: "external",
+          instructionsRootPath: externalRoot,
+          instructionsEntryFile: "AGENTS.md",
+          instructionsFilePath: path.join(externalRoot, "AGENTS.md"),
+        },
+        agent,
+      );
+      expect(result.instructionsRootPath).toBe(externalRoot);
+    });
   });
 });

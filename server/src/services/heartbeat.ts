@@ -127,6 +127,7 @@ import { environmentRuntimeService } from "./environment-runtime.js";
 import { environmentRunOrchestrator } from "./environment-run-orchestrator.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 import { resolveFromRepoRoot } from "../utils/repo-root.js";
+import { resolveManagedInstructionsRoot } from "./agent-instructions.js";
 
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
 const MAX_PERSISTED_LOG_CHUNK_CHARS = 64 * 1024;
@@ -292,7 +293,10 @@ export async function resolveExecutionRunAdapterConfig(input: {
  * time, converting them to absolute paths specific to the current machine's
  * repo location before Claude Code is launched.
  */
-export function normalizeAdapterConfigPaths(config: Record<string, unknown>): Record<string, unknown> {
+export function normalizeAdapterConfigPaths(
+  config: Record<string, unknown>,
+  agent?: { id: string; companyId: string },
+): Record<string, unknown> {
   const result = { ...config };
   // DB stores "." or a relative path; resolve to absolute so the child process
   // starts in the correct directory on whatever machine is running the server.
@@ -310,6 +314,19 @@ export function normalizeAdapterConfigPaths(config: Record<string, unknown>): Re
       }
       return arg;
     });
+  }
+  // Managed instruction bundles store absolute paths at configuration time.
+  // Recompute from the current PAPERCLIP_HOME so the paths remain correct
+  // when the server runs on a different machine or inside a container,
+  // and when the stored paths were manually cleared (empty string).
+  if (agent && result.instructionsBundleMode === "managed") {
+    const managedRoot = resolveManagedInstructionsRoot(agent);
+    result.instructionsRootPath = managedRoot;
+    const entryFile =
+      typeof result.instructionsEntryFile === "string" && result.instructionsEntryFile.trim().length > 0
+        ? result.instructionsEntryFile.trim()
+        : "AGENTS.md";
+    result.instructionsFilePath = path.resolve(managedRoot, entryFile);
   }
   return result;
 }
@@ -4938,7 +4955,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       projectEnv: projectContext?.env ?? null,
       secretsSvc,
     });
-    const resolvedConfig = normalizeAdapterConfigPaths(rawResolvedConfig);
+    const resolvedConfig = normalizeAdapterConfigPaths(rawResolvedConfig, { id: agent.id, companyId: agent.companyId });
     const runScopedMentionedSkillKeys = await resolveRunScopedMentionedSkillKeys({
       db,
       companyId: agent.companyId,
