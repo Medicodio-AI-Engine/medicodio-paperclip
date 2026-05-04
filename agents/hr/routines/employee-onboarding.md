@@ -130,7 +130,38 @@ Every audit-log row MUST use the `current_status` value from this table for the 
 **This is the first thing the routine checks on every trigger.**
 
 ```
-Step 1. Read `source` and `messageId` from the run payload (PAPERCLIP_WAKE_PAYLOAD_JSON → payload field).
+Step 1. Check issue title prefix first.
+
+─── PATH A: [HR-ONBOARDING-REPLY] ────────────────────────────────────────
+IF issue title starts with "[HR-ONBOARDING-REPLY]":
+  → This is a heartbeat-created reply sub-issue — do NOT run Phase 1/2/3
+  → Read ALL fields from issue description (key-value lines):
+      case_id, employee_email, employee_full_name, employee_type,
+      date_of_joining, recruiter_or_hr_name, recruiter_or_hr_email,
+      human_in_loop_email, current_status, parent_issue_id
+      Optional: phone_number, alternate_candidate_email
+  → Parse messageIds field: split by comma → messageId_list (chronological order)
+  → reply_count = length of messageId_list
+
+  For each messageId in messageId_list (oldest first):
+    Set messageId = current entry
+    Execute PHASE 4 logic for this messageId
+      → PHASE 5 (document validation)
+      → IF discrepancies found → PHASE 6 (resubmission email) → STOP loop
+         (heartbeat will detect the next candidate reply and create a new sub-issue)
+      → IF no discrepancies AND all mandatory docs present → continue to next messageId
+    After each message: update case-tracker and audit-log before processing next messageId
+
+  After all messageIds in list are processed:
+    → IF all mandatory docs complete → proceed to PHASE 8 (human verification)
+    → IF still partial → remain; parent issue stays in_review for heartbeat to detect next reply
+
+  Do NOT re-create SharePoint folders, re-send initial emails, or re-log case_created.
+  SKIP Phase 1 / Phase 2 / Phase 3 entirely.
+
+─── PATH B: Payload-based routing (backward compat / direct routine trigger) ───────
+Step 1b. Read `source` and `messageId` from the run payload
+         (PAPERCLIP_WAKE_PAYLOAD_JSON → payload field).
 
 IF source == "api" AND messageId is present (non-empty string):
   → This is a heartbeat-triggered reply run — do NOT run Phase 1/2/3
