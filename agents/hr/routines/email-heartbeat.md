@@ -62,6 +62,7 @@ Delegate to the onboarding routine reply-processing phases when a reply arrives.
      - `reminder_2_sent_timestamp`      (timestamp of `reminder_2_sent` row, if present)
      - `alternate_candidate_email`      (read from `HR-Onboarding/{employee_full_name} - {date_of_joining}/case-tracker.md` field `alternate_candidate_email`, or `null` if not present)
      - `paperclip_issue_id`      (column 12 of the `case_created` row for this `case_id`; `null` if missing — legacy rows pre-date this field)
+     - `last_reply_routed_timestamp`    (timestamp of the most recent `reply_detected` row for this `case_id`; `null` if no such row exists)
 
    **TIMESTAMP GUARD:** For each case, if `last_outbound_email_timestamp` is missing, null, or unparseable:
    → Append to audit-log:
@@ -73,6 +74,21 @@ Delegate to the onboarding routine reply-processing phases when a reply arrives.
      - isHtml: true
      - body: `<p>Hi,</p><p>The heartbeat could not process the onboarding case for <strong>{employee_full_name}</strong> ({employee_email}) because the last outbound email timestamp is missing or malformed in the audit log.</p><p>Case ID: {case_id}</p><p>Manual inspection of the audit log is required.</p><p>Regards,<br>HR Automation</p>`
    → Exclude this case from further processing this tick
+
+1c. Supplement missing `paperclip_issue_id` for active cases:
+    `GET /api/companies/{PAPERCLIP_COMPANY_ID}/issues?assigneeAgentId={HR_AGENT_ID}&status=in_review`
+    → For each returned issue: extract `case_id` from description (line starting with `case_id:`)
+    → If that `case_id` matches an active case where `paperclip_issue_id` is null → set `paperclip_issue_id = issue.id`
+    → Any active case still missing `paperclip_issue_id` after this step:
+      - `outlook_send_email` to `{human_in_loop_email}`:
+        - subject: `HR Alert: Cannot route replies for {employee_full_name} — Paperclip issue ID unknown`
+        - isHtml: true
+        - body: `<p>Hi,</p><p>The heartbeat could not find the Paperclip issue ID for case <strong>{case_id}</strong> ({employee_full_name}, {employee_email}). Reply sub-issue routing will fail without it. Manual lookup required.</p><p>Regards,<br>HR Automation</p>`
+      - Append to audit-log:
+        ```
+        {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|heartbeat_skip|Skipped — paperclip_issue_id unknown after Paperclip query|Cannot create reply sub-issue|—
+        ```
+      - Exclude from further processing this tick
 
 2. If no active cases → append to audit-log:
    ```
@@ -88,7 +104,8 @@ For each active case:
 
 3a. `outlook_search_emails`  
     query: `"from:{employee_email}"`  
-    → Collect **ALL** messages received AFTER `last_outbound_email_timestamp`, sorted chronologically (oldest first)
+    → Compute search cutoff: `max(last_outbound_email_timestamp, last_reply_routed_timestamp)` — use whichever is later; if `last_reply_routed_timestamp` is null, use `last_outbound_email_timestamp` alone  
+    → Collect **ALL** messages received AFTER that cutoff, sorted chronologically (oldest first)
 
 3b. IF no results from 3a:
     → subject query depends on employee_type:
@@ -110,68 +127,68 @@ For each active case:
         - Skip nudge for this tick; continue to next case
 
 4. IF one or more replies found (from step 3a or 3b):
-   → Process replies **in chronological order** (oldest first)
-   → For each reply message:
 
-   **Route by employee_type:**
+   **Collect ALL reply messageIds for this case first (do not process one-by-one):**
+   → messageId_list = all reply messages sorted chronologically (oldest first)
+   → N = total count
 
-   IF `employee_type` == `intern_fte_form`:
-     - Append to audit-log:
-       ```
-       {now}|{case_id}|{employee_email}|{employee_full_name}|intern_fte_form|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|reply_detected|Creating [INTERN-FTE-FORM] issue for reply processing|messageId: {messageId}|{paperclip_issue_id or —}
-       ```
-     - Create a new Paperclip issue (same pattern as onboarding):
-       ```
-       POST /api/companies/{PAPERCLIP_COMPANY_ID}/issues
-       {
-         "title": "[INTERN-FTE-FORM] {employee_full_name}",
-         "description": "source: api\nmessageId: {messageId}\ncase_id: {case_id}\nemployee_full_name: {employee_full_name}\nemployee_email: {employee_email}\nrole: {role}\nemployee_type: intern\ndate_of_joining: {date_of_joining}\nrecruiter_or_hr_name: {recruiter_or_hr_name}\nrecruiter_or_hr_email: {recruiter_or_hr_email}\nhuman_in_loop_email: {human_in_loop_email}\nphone_number: {phone_number}\nexcel_url: {excel_url or (omit line if null)}\ncurrent_status: {current_status}",
-         "assigneeAgentId": "{HR_AGENT_ID}",
-         "projectId": "{ONBOARDING_PROJECT_ID}",
-         "parentId": "{paperclip_issue_id}"
-       }
-       ```
-       → Agent picks it up via `[INTERN-FTE-FORM]` title prefix → reads `source: api` + `messageId` → jumps to Phase 4.
-     - If issue creation fails:
-       - `outlook_send_email` to `{human_in_loop_email}`:
-         - subject: `HR Alert: Failed to create form reply issue for {employee_full_name}`
-         - isHtml: true
-         - body: `<p>Hi,</p><p>The heartbeat detected a reply from <strong>{employee_full_name}</strong> but failed to create the processing issue.</p><p>Case ID: {case_id}<br>Message ID: {messageId}</p><p>Manual intervention is required.</p><p>Regards,<br>HR Automation</p>`
+   **Determine title prefix by employee_type:**
+   - `intern_fte_form` → title prefix: `[INTERN-FTE-FORM]`
+   - all other types   → title prefix: `[HR-ONBOARDING-REPLY]`
 
-   ELSE (standard onboarding case):
-     - Append to audit-log:
-       ```
-       {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|reply_detected|Delegating to onboarding routine Phase 4|messageId: {messageId}|{paperclip_issue_id or —}
-       ```
-     - Delegate to onboarding routine:
-       ```
-       POST /api/routines/ddedecdb-871a-4ad1-980b-5935a2ecda75/run
-       {
-         "source": "api",
-         "parentIssueId": "{paperclip_issue_id}",
-         "payload": {
-           "case_id": "{case_id}",
-           "messageId": "{messageId}",
-           "employee_email": "{employee_email}",
-           "employee_full_name": "{employee_full_name}",
-           "employee_type": "{employee_type}",
-           "date_of_joining": "{date_of_joining}",
-           "recruiter_or_hr_name": "{recruiter_or_hr_name}",
-           "recruiter_or_hr_email": "{recruiter_or_hr_email}",
-           "human_in_loop_email": "{human_in_loop_email}",
-           "alternate_candidate_email": "{alternate_candidate_email or null}",
-           "current_status": "{current_status}",
-           "reply_index": {N},
-           "total_replies": {total count}
-         },
-         "idempotencyKey": "{case_id}-reply-{messageId}"
-       }
-       ```
-     - If delegation fails:
-       - `outlook_send_email` to `{human_in_loop_email}`:
-         - subject: `HR Alert: Failed to delegate reply for {employee_full_name}`
-         - isHtml: true
-         - body: `<p>Hi,</p><p>The heartbeat detected a reply from <strong>{employee_full_name}</strong> but failed to trigger the onboarding routine.</p><p>Case ID: {case_id}<br>Message ID: {messageId}</p><p>Manual intervention is required.</p><p>Regards,<br>HR Automation</p>`
+   **Build child issue description (key-value lines):**
+   ```
+   source: api
+   case_id: {case_id}
+   messageIds: {messageId1},{messageId2},...        ← comma-separated, chronological order
+   reply_count: {N}
+   employee_email: {employee_email}
+   employee_full_name: {employee_full_name}
+   employee_type: {employee_type}
+   date_of_joining: {date_of_joining}
+   recruiter_or_hr_name: {recruiter_or_hr_name}
+   recruiter_or_hr_email: {recruiter_or_hr_email}
+   human_in_loop_email: {human_in_loop_email}
+   current_status: {current_status}
+   parent_issue_id: {paperclip_issue_id}
+   [IF phone_number non-null:            phone_number: {value}]
+   [IF alternate_candidate_email non-null: alternate_candidate_email: {value}]
+   [IF intern_fte_form AND role non-null: role: {value}]
+   [IF intern_fte_form AND excel_url non-null: excel_url: {value}]
+   ```
+
+   **Create ONE child issue (one per case per tick — not one per message):**
+   ```
+   POST /api/companies/{PAPERCLIP_COMPANY_ID}/issues
+   Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
+   {
+     "title": "{prefix} {employee_full_name} — {N} new reply(s)",
+     "description": "{key-value lines above}",
+     "assigneeAgentId": "{HR_AGENT_ID}",
+     "parentId": "{paperclip_issue_id}",
+     "status": "todo",
+     "priority": "high"
+   }
+   ```
+   → Agent picks it up by title prefix → reads `messageIds` → processes each in sequence → jumps to Phase 4.
+
+   On success:
+   - Append to audit-log:
+     ```
+     {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|reply_detected|Reply sub-issue created — {N} message(s) queued|Sub-issue: {created_issue_id} Parent: {paperclip_issue_id}|{paperclip_issue_id}
+     ```
+   - Continue to next case (do NOT send nudge)
+
+   On failure (issue creation returns error — retry once, then escalate):
+   - `outlook_send_email` to `{human_in_loop_email}`:
+     - subject: `HR Alert: Failed to create reply sub-issue for {employee_full_name}`
+     - isHtml: true
+     - body: `<p>Hi,</p><p>The heartbeat detected {N} reply(s) from <strong>{employee_full_name}</strong> ({employee_email}) but failed to create the reply processing sub-issue after one retry.</p><p>Case ID: {case_id}<br>Message IDs: {messageId1},{messageId2},...<br>Expected parent issue: {paperclip_issue_id}<br>Error: {error}</p><p>Manual intervention required — process replies manually and re-trigger if needed.</p><p>Regards,<br>HR Automation</p>`
+   - Append to audit-log:
+     ```
+     {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|escalated|Failed to create reply sub-issue after retry|{error}|{paperclip_issue_id or —}
+     ```
+   - Continue to next case (do NOT send nudge)
 
    → Continue to next case (do NOT send nudge for any case that had replies)
 
