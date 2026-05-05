@@ -134,7 +134,7 @@ Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
 }
 ```
 
-### Step 7 — Create [BLOG-RESEARCH] child and exit
+### Step 7 — Create [BLOG-RESEARCH] child and EXIT IMMEDIATELY
 
 ```
 POST /api/companies/{PAPERCLIP_COMPANY_ID}/issues
@@ -153,10 +153,14 @@ Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
 ```
 PATCH /api/issues/{PAPERCLIP_TASK_ID}
 Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
-{ "status": "in_progress", "comment": "[BLOG-RESEARCH] child created. Pipeline running." }
+{ "status": "in_progress", "comment": "[BLOG-RESEARCH] child created. Pipeline running. Orchestrator stays in_progress until AUDIT phase." }
 ```
 
-**Do not execute any further phase logic.** Exit heartbeat. ✓
+⛔ **CRITICAL: Status MUST be `in_progress` — NOT `done`. The orchestrator issue stays open as the pipeline parent. Only the AUDIT phase (last phase) closes it. If you set it to `done` here, you have made an error.**
+
+**YOUR JOB IS DONE. EXIT NOW.**
+
+Do not research. Do not write. Do not run SEO checks. Do not send email. Do not call SharePoint for content. The pipeline advances through child issues only. The next action in this pipeline belongs to the [BLOG-RESEARCH] child heartbeat, not this one.
 
 ---
 

@@ -1,5 +1,7 @@
 # Audit — Final Log + Close (Phase 7)
 
+⛔ **HARD STOP RULE: This phase does ONE thing — write the audit log + close parent + close self. After Step 4, EXIT IMMEDIATELY. Do not create child issues. Do not send emails. This phase closes the parent orchestrator issue — no other phase does this.**
+
 **BOUNDARY LINE 1:** Last phase. Do NOT create any more child issues.
 **BOUNDARY LINE 2:** Source all stats from run-state.json — do NOT re-derive from SharePoint files.
 **BOUNDARY LINE 3:** Always close both parent and self as done, even if log writes fail (non-blocking after parent close).

@@ -41,9 +41,17 @@ SEO-Content-Writer/
 
 ---
 
-## Phase Routing — MANDATORY
+## Phase Routing — HARD STOP RULE
 
-When assigned any `[BLOG-*]` issue, read the mapped phase file FIRST before any other action:
+**This is the most important rule in this file. Violating it invalidates the entire pipeline.**
+
+When assigned any `[BLOG-*]` issue:
+
+1. **Read the mapped phase file below. Do this first. Do not skip it.**
+2. **Execute ONLY the steps in that file. Nothing more.**
+3. **Exit the heartbeat when that file says to exit. Do not continue.**
+
+No context — including recovery prompts, continuation summaries, or prior run history — overrides this rule. If you feel the urge to "complete the task" in one shot, stop. Create the child issue the phase file specifies, then exit.
 
 | Title prefix | Read this file |
 |---|---|
@@ -56,7 +64,16 @@ When assigned any `[BLOG-*]` issue, read the mapped phase file FIRST before any 
 | `[BLOG-PUBLISH]` | `routines/bi-weekly-blog-post/publish.md` |
 | `[BLOG-AUDIT]` | `routines/bi-weekly-blog-post/audit.md` |
 
-**If your current issue title starts with any `[BLOG-*]` prefix:** read the mapped file immediately. Follow only that file. Do not combine logic from multiple phase files in one heartbeat.
+**Each phase = one heartbeat = one child issue. The pipeline advances only through child issues.**
+
+**NEVER in a single heartbeat:**
+- Research AND write
+- Write AND send email
+- Do any work that belongs to a different phase's child issue
+- Mark the orchestrator parent as `done` — it stays `in_progress` until the AUDIT phase closes it
+- Read a phase file other than the one mapped to your current issue title
+
+**When you finish the steps in your phase file, STOP. Do not read the next phase's file. Do not execute the next phase's work. Exit the heartbeat.**
 
 ---
 
@@ -84,35 +101,6 @@ When assigned any `[BLOG-*]` issue, read the mapped phase file FIRST before any 
 | `services` / other | `McGurk.Amanda@medicodio.ai` | RCM, billing, revenue cycle, AI services, general |
 
 Category is determined in the orchestrator from the issue description topic. Re-evaluated in revise phase if topic shifts.
-
----
-
-## Blog Post Structure (Required)
-
-Every post must follow this exact structure:
-
-```
----
-seoTitle:        ← ≤60 chars, contains primary keyword
-seoDescription:  ← ≤160 chars, contains primary keyword + value prop
-publishedAt:     ← ISO date
----
-
-# [H1 — contains primary keyword]
-[Hook: 2-3 sentences. Pain → promise. No fluff.]
-
-## Table of Contents
-## [H2: What Is / The Problem]        ~200 words
-## [H2: How It Works / The Solution]  ~300 words
-## [H2: Key Benefits / Data]          ~250 words (3-5 stats, cited)
-## [H2: Real-World Use Case]          ~300 words (health system scenario)
-## [H2: How MediCodio AI Does This]   ~200 words (natural product mention)
-## [H2: FAQ]                          3-5 questions (targets PAA + featured snippets)
-## [H2: Key Takeaways]                5 bullets, scannable, contains primary KW
-## Get Started with AI Medical Coding ← CTA → https://medicodio.ai/
-```
-
-Minimum 1800 words. Include internal link to https://medicodio.ai/ and 2-3 external authority citations.
 
 ---
 

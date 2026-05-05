@@ -1,10 +1,15 @@
 # Email — Approval Request (Phase 4)
 
+⛔ **HARD STOP RULE: This phase does ONE thing — send the approval email + set parent to in_review + close self. After Step 6, EXIT IMMEDIATELY. Do NOT create [BLOG-REVISE] or [BLOG-PUBLISH]. Email-monitor routine creates the next child when the approver replies.**
+
 **BOUNDARY LINE 1:** Send ONE email only. Do not send to both approvers.
 **BOUNDARY LINE 2:** CC naveen@medicodio.ai on every send — no exceptions.
 **BOUNDARY LINE 3:** After sending, exit. Do NOT create a next child issue here. The email-monitor routine creates the next child.
+**BOUNDARY LINE 4:** Email MUST be sent as HTML (`bodyType="HTML"`). Never send plain text. Never improvise the email body — use the exact HTML template in Step 2.
+**BOUNDARY LINE 5:** The draft link in the email MUST be the SharePoint `webUrl` from `sharepoint_get_file_info`. Never use a filename, file path, or download URL.
+**BOUNDARY LINE 6:** NEVER include the blog content or markdown in the email body. The email contains ONLY the metadata table + SEO scorecard + reply instructions. The approver clicks the SharePoint link to read the draft.
+**BOUNDARY LINE 7:** NEVER send to `OUTLOOK_MAILBOX`. If `approverEmail` == `OUTLOOK_MAILBOX` (i.e. `karthik.r@medicodio.ai`), the run-state.json has a bad value. Post blocked: "approverEmail resolves to sender address — run-state.json approverEmail is invalid. Check orchestrator category routing." STOP.
 **STATE:** Reads run-state.json + seo-check.md. Writes `email` section. Sets parent → in_review. Closes self.
-**DO NOT:** Create [BLOG-REVISE] or [BLOG-PUBLISH] here. That is email-monitor's job.
 
 ---
 
@@ -21,7 +26,11 @@ sharepoint_read_file path="{runFolder}/logs/seo-check.md"
 → store scorecard_content (for email body)
 
 sharepoint_get_file_info path="{runFolder}/draft.md"
-→ store webUrl as draft_share_url
+→ extract the "webUrl" field from the response
+→ store as draft_share_url
+→ MUST be an https:// URL pointing to the SharePoint web viewer
+→ NEVER use a file path, filename, or download link as draft_share_url
+→ IF sharepoint_get_file_info fails or returns no webUrl: post blocked "Cannot get SharePoint webUrl for draft.md". STOP.
 ```
 
 ## Step 2 — Compose approval email
@@ -73,6 +82,11 @@ sharepoint_get_file_info path="{runFolder}/draft.md"
 ## Step 3 — Send email
 
 ```
+IF approverEmail == OUTLOOK_MAILBOX:
+  POST /api/issues/{PAPERCLIP_TASK_ID}/comments
+  { "body": "BLOCKED: approverEmail == OUTLOOK_MAILBOX (karthik.r@medicodio.ai). run-state.json has invalid approverEmail. Check orchestrator category routing and correct run-state.json manually." }
+  PATCH issue → blocked. STOP.
+
 outlook_send_email
   mailbox="{OUTLOOK_MAILBOX}"
   to="{approverEmail}"

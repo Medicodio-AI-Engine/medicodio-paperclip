@@ -1,10 +1,11 @@
 # Research — SERP Analysis (Phase 1)
 
-**BOUNDARY LINE 1:** Research only — do NOT write the blog post here.
+⛔ **HARD STOP RULE: This phase does ONE thing — SERP research + create [BLOG-WRITE] child. After Step 7, YOUR JOB IS DONE. EXIT THE HEARTBEAT IMMEDIATELY. Do not write the blog. Do not score SEO. Do not send email. Do not read write.md, seo-check.md, email.md or any other phase file. The next heartbeat handles the next phase.**
+
+**BOUNDARY LINE 1:** Research only — do NOT write the blog post here. Not even a draft. Not even an outline.
 **BOUNDARY LINE 2:** All run context comes from run-state.json at `run_state_path` in issue description.
 **BOUNDARY LINE 3:** Fetch before Playwright — only use Playwright if fetch returns empty content.
-**STATE:** Reads initial run-state.json. Writes `research` section. Creates `[BLOG-WRITE]` child.
-**DO NOT:** Write draft.md. Send emails. Run SEO check.
+**STATE:** Reads initial run-state.json. Writes `research` section. Creates `[BLOG-WRITE]` child. Closes self.
 
 ---
 
@@ -142,3 +143,5 @@ PATCH /api/issues/{PAPERCLIP_TASK_ID}
 Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
 { "status": "done", "comment": "Research complete. {len(top_urls)} URLs analysed. {len(gaps)} content gaps found. [BLOG-WRITE] created." }
 ```
+
+⛔ **YOUR JOB IS DONE. EXIT NOW. Do not write the blog post. Do not open write.md. The [BLOG-WRITE] child issue you just created will handle writing in the next heartbeat.**

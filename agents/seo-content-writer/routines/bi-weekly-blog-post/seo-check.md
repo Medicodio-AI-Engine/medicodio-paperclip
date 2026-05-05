@@ -1,10 +1,11 @@
 # SEO Check — Keyword Scoring + Auto-Fix (Phase 3)
 
+⛔ **HARD STOP RULE: This phase does ONE thing — score + fix SEO + create [BLOG-EMAIL] child. After Step 8, EXIT IMMEDIATELY. Do not send the email yourself. Do not read email.md. The [BLOG-EMAIL] child handles that.**
+
 **BOUNDARY LINE 1:** Load keyword cluster from config.md — do NOT use a hardcoded list.
 **BOUNDARY LINE 2:** draft.md is updated IN PLACE when fixes are applied — write back to SharePoint.
 **BOUNDARY LINE 3:** Do not proceed to [BLOG-EMAIL] if overall score < 70 — rewrite first.
-**STATE:** Reads run-state.json + config.md + draft.md. Writes `seo_check` section. Updates draft.md. Creates `[BLOG-EMAIL]` child.
-**DO NOT:** Send emails. Research SERP again.
+**STATE:** Reads run-state.json + config.md + draft.md. Writes `seo_check` section. Updates draft.md. Creates `[BLOG-EMAIL]` child. Closes self.
 
 ---
 
@@ -143,3 +144,5 @@ PATCH /api/issues/{PAPERCLIP_TASK_ID}
 Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
 { "status": "done", "comment": "SEO check complete. Score: {overall_score}/100. Fixed {N} keywords. [BLOG-EMAIL] created." }
 ```
+
+⛔ **YOUR JOB IS DONE. EXIT NOW. Do not send the email. The [BLOG-EMAIL] child issue handles that in the next heartbeat.**

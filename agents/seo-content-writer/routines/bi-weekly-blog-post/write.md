@@ -1,10 +1,11 @@
 # Write — Blog Post Authoring (Phase 2)
 
+⛔ **HARD STOP RULE: This phase does ONE thing — write the blog draft + create [BLOG-SEO-CHECK] child. After Step 7, EXIT IMMEDIATELY. Do not score SEO. Do not send email. Do not publish. Do not read seo-check.md or any other phase file.**
+
 **BOUNDARY LINE 1:** Write from run-state.json research findings only — do NOT re-search SERP here.
 **BOUNDARY LINE 2:** Draft goes to draft.md in SharePoint run folder — nowhere else.
 **BOUNDARY LINE 3:** Minimum 1800 words. Do not close this phase if wordCount < 1800.
-**STATE:** Reads `research` section of run-state.json. Writes `write` section. Creates `[BLOG-SEO-CHECK]` child.
-**DO NOT:** Run SEO scoring. Send emails. Publish.
+**STATE:** Reads `research` section of run-state.json. Writes `write` section. Creates `[BLOG-SEO-CHECK]` child. Closes self.
 
 ---
 
@@ -163,3 +164,5 @@ PATCH /api/issues/{PAPERCLIP_TASK_ID}
 Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
 { "status": "done", "comment": "Draft written. Word count: {N}. SEO title: {seoTitle}. [BLOG-SEO-CHECK] created." }
 ```
+
+⛔ **YOUR JOB IS DONE. EXIT NOW. Do not run SEO scoring. Do not send email. The [BLOG-SEO-CHECK] child issue you just created handles the next step.**

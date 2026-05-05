@@ -1,10 +1,11 @@
 # Publish — Post to medicodio.ai (Phase 6)
 
+⛔ **HARD STOP RULE: This phase does ONE thing — publish to medicodio.ai + create [BLOG-AUDIT] child + close self. After Step 8, EXIT IMMEDIATELY. Do not close the parent. Do not send emails. Audit phase closes the parent.**
+
 **BOUNDARY LINE 1:** Only publish after confirmed approval — check run-state.json status is "publish_queued".
 **BOUNDARY LINE 2:** Portable Text conversion done via `scripts/md-to-portable-text.js` — do NOT attempt to construct PT blocks manually.
 **BOUNDARY LINE 3:** Save publishResponseId from API response — required for audit log.
 **STATE:** Reads run-state.json + draft.md. POSTs to /api/blog/push. Writes `publish` section. Creates `[BLOG-AUDIT]` child.
-**DO NOT:** Modify draft content here. Send more emails.
 
 ---
 

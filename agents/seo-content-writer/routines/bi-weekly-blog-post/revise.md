@@ -1,11 +1,12 @@
 # Revise — Apply Changes + Re-Check (Revision Phase)
 
+⛔ **HARD STOP RULE: This phase does ONE thing — apply reviewer changes + reply to email + close self. After Step 8, EXIT IMMEDIATELY. Do NOT publish. Do NOT create [BLOG-PUBLISH]. Email-monitor creates the next child.**
+
 **BOUNDARY LINE 1:** Changes come from the reviewer's email reply — do NOT invent changes.
 **BOUNDARY LINE 2:** Inline SEO re-check only (abbreviated). Do NOT create a new [BLOG-SEO-CHECK] child.
 **BOUNDARY LINE 3:** After revising, set status = "awaiting_reply" and exit. Email-monitor creates the next child.
 **BOUNDARY LINE 4:** If revisionCount >= maxRevisions: block parent, email karthik.r, EXIT without revising.
 **STATE:** Reads run-state.json. Updates draft.md. Writes `revise-{n}` section. Closes self.
-**DO NOT:** Publish. Create [BLOG-PUBLISH] here. Send to a different approver.
 
 ---
 
