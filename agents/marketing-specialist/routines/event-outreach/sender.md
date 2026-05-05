@@ -1,7 +1,7 @@
 # Sender — Sufficiency Check + Compose + Send (PHASE 3 + PHASE 4)
 
 **DATA RULE LINE 1:** All row data comes from run-state.json. Do NOT re-read Excel for batch data.
-**EMAIL TOOL LINE 2:** `resend_send_email` for direct mode. `outlook_create_draft` for draft_review mode. NEVER use outlook_send_message to deliver email — Resend is the ONLY delivery mechanism.
+**EMAIL TOOL LINE 2:** `resend_send_email` for direct mode. `outlook_create_draft` for draft_review mode. NEVER use `outlook_create_draft`, `outlook_send_draft`, or any Outlook tool when `send_mode = "direct"` — Resend is the ONLY delivery mechanism in direct mode. NEVER use `outlook_send_message` in any mode.
 **WRITE RULE LINE 3:** Write Excel audit for each row IMMEDIATELY after send — before moving to next row.
 **STATE:** Reads `batch_loader.has_email_rows[]` + `enricher.enriched_rows[]` + `config.*` from run-state.json.
 **CREATES NEXT:** `[EO-AUDITOR]` child issue.
@@ -75,7 +75,29 @@ For each row in sendable:
 - NEVER mention their job title explicitly in the body
 - NEVER fabricate facts about their company — if you have no company-specific fact, use the template's generic framing unchanged
 - Replace all placeholders: {first_name}, {event_name}, {event_dates}, {event_location}, {booth_number}, {company}
-- Append mandatory signature block (from AGENTS.md) — verify composed_html ends with `</table>` of signature
+- Append this exact signature block after the email body — no exceptions, no omissions:
+
+```html
+<br><br>
+<table cellpadding="0" cellspacing="0" border="0" style="font-family: Arial, Helvetica, sans-serif; color:#333333; line-height:1.5; border-left:3px solid #0a1d56; padding-left:16px;">
+  <tr><td>
+    <table cellpadding="0" cellspacing="0" border="0">
+      <tr><td style="font-family: Arial, Helvetica, sans-serif; font-size:14px; color:#0a1d56; font-weight:700; padding-bottom:2px;">Thanks &amp; Regards,</td></tr>
+      <tr><td style="font-family: Arial, Helvetica, sans-serif; font-size:16px; color:#0a1d56; font-weight:700; padding-bottom:4px;">Medicodio</td></tr>
+      <tr><td style="font-family: Arial, Helvetica, sans-serif; font-size:12px; color:#666666; padding-bottom:10px; letter-spacing:0.3px; text-transform:uppercase;">AI Powered Medical Coding</td></tr>
+      <tr><td style="font-family: Arial, Helvetica, sans-serif; font-size:13px; color:#333333; padding-top:8px; border-top:1px solid #e5e7eb;">
+        <a href="https://medicodio.ai/" style="color:#0a1d56; text-decoration:none; font-weight:600;" target="_blank">MediCodio AI</a>
+        <span style="color:#c0c5d1; padding:0 6px;">|</span>
+        <a href="https://www.linkedin.com/company/medicodioai/" style="color:#0a1d56; text-decoration:none; font-weight:600;" target="_blank">LinkedIn</a>
+        <span style="color:#c0c5d1; padding:0 6px;">|</span>
+        <a href="mailto:marketing@medicodio.site" style="color:#0a1d56; text-decoration:none; font-weight:600;">marketing@medicodio.site</a>
+      </td></tr>
+    </table>
+  </td></tr>
+</table>
+```
+
+- **HARD ASSERTION:** Before sending, verify `composed_html` ends with `</table>`. If it does not, skip this row, post error comment "Row {row}: signature missing from composed HTML — skipped to prevent unsigned send.", and continue to next row.
 
 **Idempotency check before send — skip if already sent:**
 ```
