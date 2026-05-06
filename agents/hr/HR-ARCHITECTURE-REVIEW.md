@@ -175,10 +175,10 @@ employee_email: jane.doe@example.com
 role: Software Engineer
 employee_type: fresher          ← intern | fresher | fte | experienced | contractor | rehire
 date_of_joining: 2026-05-01
-recruiter_or_hr_name: Karthik
-recruiter_or_hr_email: karthik.r@medicodio.ai
-human_in_loop_name: Karthik
-human_in_loop_email: karthik.r@medicodio.ai
+recruiter_or_hr_name: Recruiter Name
+recruiter_or_hr_email: recruiter@example.com
+human_in_loop_name: HR Reviewer
+human_in_loop_email: hr-reviewer@example.com
 ```
 
 ### Optional fields

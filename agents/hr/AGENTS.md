@@ -185,10 +185,10 @@ employee_email: jane.doe@example.com
 role: Software Engineer
 employee_type: fresher
 date_of_joining: 2026-05-01
-recruiter_or_hr_name: Karthik
-recruiter_or_hr_email: karthik.r@medicodio.ai
-human_in_loop_name:  Murali (HR)
-human_in_loop_email: Murali.ks@medicodio.ai
+recruiter_or_hr_name: Recruiter Name
+recruiter_or_hr_email: recruiter@example.com
+human_in_loop_name: HR Reviewer
+human_in_loop_email: hr-reviewer@example.com
 ```
 
 Optional fields: `alternate_candidate_email`, `date_of_birth` (ISO format, e.g. `1995-06-15` — used for document identity verification), `hiring_manager_name`, `hiring_manager_email`, `business_unit`, `location`, `joining_mode`, `notes_from_hr`, `special_document_requirements`

@@ -28,9 +28,9 @@ AUDIT_LOG_PATH: HR-Onboarding/audit-log.csv
 ## Default HR Contact
 
 ```
-DEFAULT_HR_NAME: Karthik
-DEFAULT_HR_EMAIL: karthik.r@medicodio.ai
-DEFAULT_HUMAN_IN_LOOP_EMAIL: karthik.r@medicodio.ai
+DEFAULT_HR_NAME: HR Contact Name
+DEFAULT_HR_EMAIL: hr@example.com
+DEFAULT_HUMAN_IN_LOOP_EMAIL: hr-reviewer@example.com
 ```
 
 ---
