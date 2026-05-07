@@ -220,6 +220,17 @@ Step 8. sharepoint_create_folder parentPath="HR-Onboarding/{employee_full_name} 
 
 Step 9. sharepoint_create_folder parentPath="HR-Onboarding/{employee_full_name} - {date_of_joining}" folderName="03_Exception_Notes"
 
+Step 9a. Copy HRMS Excel template to employee folder:
+    sharepoint_copy_file
+      sourcePath     = "hr-onboarding/templates/EmployeeSheet_Onboarding_Form_Medicodio_HRMS.xlsx"
+      destFolderPath = "HR-Onboarding/{employee_full_name} - {date_of_joining}"
+      newName        = "EmployeeSheet_{employee_full_name}.xlsx"
+    → CRITICAL: Store the `webUrl` from the copy response immediately as {excel_url}. Do NOT use the template's URL.
+    → On failure: notify human_in_loop_email, STOP.
+
+Step 9b. Confirm copy is valid:
+    → If size = 0 or webUrl missing: notify human_in_loop_email, STOP.
+
 Step 10. Append to audit-log (CSV append pattern):
     {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|initiated|case_created|Onboarding case initialised — folders created in SharePoint|—|{PAPERCLIP_TASK_ID}
 
@@ -242,6 +253,7 @@ Step 11. Create per-employee case tracker:
     | HR Contact | {recruiter_or_hr_name} |
     | HR Contact Email | {recruiter_or_hr_email} |
     | Case ID | {case_id} |
+    | HRMS Form URL | {excel_url} |
 
     ## Status History
     | Timestamp | Status | Notes |
@@ -309,6 +321,9 @@ Body:
   <li>Email ID</li>
   <li>DOB</li>
 </ul>
+<p><strong>Additionally, please fill in and return the HRMS Onboarding Form:</strong></p>
+<p><a href="{excel_url}">Click here to open your HRMS Onboarding Form</a></p>
+<p>Please fill in all fields in the form and send it back along with your documents.</p>
 <p>For any clarifications, please contact the undersigned.</p>
 <p>Regards,<br>{recruiter_or_hr_name}</p>
 ```
@@ -338,6 +353,9 @@ Body:
   <li>Email ID</li>
   <li>DOB</li>
 </ul>
+<p><strong>Additionally, please fill in and return the HRMS Onboarding Form:</strong></p>
+<p><a href="{excel_url}">Click here to open your HRMS Onboarding Form</a></p>
+<p>Please fill in all fields in the form and send it back along with your documents.</p>
 <p>For any clarifications, please contact the undersigned.</p>
 <p>Regards,<br>{recruiter_or_hr_name}</p>
 ```
@@ -361,6 +379,9 @@ Body:
     <li>Additional requirements: {special_document_requirements}</li>
   ELSE: omit this item entirely — never output "{special_document_requirements if any}" verbatim]
 </ol>
+<p><strong>Additionally, please fill in and return the HRMS Onboarding Form:</strong></p>
+<p><a href="{excel_url}">Click here to open your HRMS Onboarding Form</a></p>
+<p>Please fill in all fields in the form and send it back along with your documents.</p>
 <p>Regards,<br>{recruiter_or_hr_name}</p>
 ```
 
@@ -530,10 +551,10 @@ Step 25b. Upload all received attachments to Raw Submissions (BEFORE validation)
 
 | Type | Mandatory |
 |---|---|
-| intern/fresher | Resume, Photo, Education Certs, PAN, Address (perm+temp), Aadhar, Address Proof, Full Name, Email, DOB |
-| fte/experienced | Highest Qual Cert, Offer/Appointment Letters, 3 Payslips, Relieving Letters, Aadhar, PAN, Address Proof, Full Name, Email, DOB |
-| contractor | Resume, PAN, Aadhar, Address Proof, Full Name, Email, DOB |
-| rehire | Resume, Updated Address, Address Proof, PAN/Aadhar if changed, Full Name, Email, DOB |
+| intern/fresher | Resume, Photo, Education Certs, PAN, Address (perm+temp), Aadhar, Address Proof, Full Name, Email, DOB, **HRMS Onboarding Form (Excel)** |
+| fte/experienced | Highest Qual Cert, Offer/Appointment Letters, 3 Payslips, Relieving Letters, Aadhar, PAN, Address Proof, Full Name, Email, DOB, **HRMS Onboarding Form (Excel)** |
+| contractor | Resume, PAN, Aadhar, Address Proof, Full Name, Email, DOB, **HRMS Onboarding Form (Excel)** |
+| rehire | Resume, Updated Address, Address Proof, PAN/Aadhar if changed, Full Name, Email, DOB, **HRMS Onboarding Form (Excel)** |
 
 ```
 ⚠️ INVOKE DOCUMENT VALIDATOR SKILL — MANDATORY. DO THIS FIRST. NO EXCEPTIONS.
