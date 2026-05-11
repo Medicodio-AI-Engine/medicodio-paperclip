@@ -17,7 +17,13 @@ parent_issue_id = extract from issue description line: "parent_issue_id: ..."
 
 sharepoint_read_file path="{run_state_path}"
 → IF missing: post blocked "run-state.json not found at {run_state_path}." STOP.
-→ extract: topic, primaryKeyword, contentBrief, runFolder, parentIssueId
+→ extract: topic, primaryKeyword, contentBrief, runFolder, parentIssueId, phases.research
+
+→ IF phases.research == "done":
+   post comment "Idempotency: research already completed in a prior run. Creating [BLOG-WRITE] child and exiting."
+   Go directly to Step 7.
+
+→ extract remaining fields: topic, primaryKeyword, contentBrief, runFolder, parentIssueId
 ```
 
 ## Step 2 — SERP research

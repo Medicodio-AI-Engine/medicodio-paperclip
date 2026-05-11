@@ -16,7 +16,12 @@ run_state_path = extract from issue description
 parent_issue_id = extract from issue description
 
 sharepoint_read_file path="{run_state_path}"
-→ extract: topic, primaryKeyword, runFolder, seoScore, wordCount, approverEmail, seoCheck.scorecard_path
+→ extract: topic, slug, primaryKeyword, runFolder, seoScore, wordCount, approverEmail, seoCheck.scorecard_path, phases.publish, schema_json
+
+→ IF phases.publish == "done":
+   post comment "Idempotency: publish already completed in prior run. Creating [BLOG-AUDIT] child and exiting."
+   Go to Step 8.
+
 → IF status ≠ "publish_queued":
    post blocked "run-state.json status is '{status}', expected 'publish_queued'. Do not publish without approval."
    STOP.
@@ -32,21 +37,69 @@ sharepoint_read_file path="{runFolder}/draft.md"
 Parse frontmatter:
 ```
 seoTitle = value of `seoTitle:` line (≤60 chars — if >60 chars, truncate at last word boundary)
-seoDescription = value of `seoDescription:` line (≤160 chars)
+seoDescription = value of `seoDescription:` line (≤160 chars — if >160 chars, truncate at last word boundary preserving full sentence where possible)
+mainImage = value of `mainImage:` line (optional, set after Tier 3 ships) — name must match existing Sanity field `mainImage` on the medicodio.ai backend
 ```
 
 Strip frontmatter (lines between `---` markers) from draft_content. Keep only the markdown body.
 
+## Step 2.5 — Resolve schema_json placeholders
+
+The skill produced `schema_json` with `{placeholder}` fields that depend on publish-time data. Resolve them now.
+
+**Canonical URL shape (IMPORTANT — discovered from medicodio.ai backend audit 2026-05-11):**
+The live site routes blog posts at `/resources/blog/<slug>`, NOT `/blog/<slug>`. The `/blog/*` namespace is a redirect stub. Always use `/resources/blog/<slug>` for canonical URLs sent to the publish API and embedded in schema.
+
+```
+canonical_url = "https://medicodio.ai/resources/blog/{slug}"
+organization_name = "Medicodio"
+organization_url  = "https://medicodio.ai"
+logo_url          = "https://medicodio.ai/medicodio-logo.png"
+image_url         = mainImage if present, else "https://medicodio.ai/og-default.png"
+```
+
+**Null safety:** if `schema_json` is missing from run-state (e.g., earlier phase skipped or crashed), set `schema_resolved = null` and skip the rest of Step 2.5. Server falls back to its own BlogPosting generation. Do NOT block — schema is optional.
+
+Parse `schema_json` (string → object). Replace placeholders defensively (each nested key may be absent on first run):
+
+```
+schema = JSON.parse(schema_json)
+schema.url = canonical_url
+
+schema.mainEntityOfPage = schema.mainEntityOfPage || { "@type": "WebPage" }
+schema.mainEntityOfPage["@id"] = canonical_url
+
+schema.image = schema.image || { "@type": "ImageObject" }
+schema.image.url = image_url
+
+schema.author = schema.author || { "@type": "Organization" }
+schema.author.name = organization_name
+schema.author.url = organization_url
+
+schema.publisher = schema.publisher || { "@type": "Organization" }
+schema.publisher.name = organization_name
+schema.publisher.logo = schema.publisher.logo || { "@type": "ImageObject" }
+schema.publisher.logo.url = logo_url
+```
+
+If any required field still contains `{placeholder}` after resolution, post warning comment but continue (do not block). Save resolved schema back to memory as `schema_resolved`.
+
+Validate: `JSON.stringify(schema_resolved)` must produce valid JSON. If parse fails, set `schema_resolved = null`, post warning "Schema JSON-LD invalid after resolution: {error}. Publishing without pipeline schema; server fallback active." Continue — do not block.
+
 ## Step 3 — Convert markdown to Portable Text
 
-Write draft body to a temp file and run the converter:
+Write the draft body to a temp file and run the converter.
+
+**CRITICAL: Do NOT use `echo` or shell variable interpolation to write the file — draft content contains special characters that break shell quoting.**
+
+Use the Write tool (or equivalent file-writing tool) to write the draft body to:
+`/tmp/blog-draft-{PAPERCLIP_RUN_ID}.md`
+
+Do not use bash heredoc or `echo` for this step.
 
 ```bash
-# Write markdown body to temp file
-echo "{draft_body}" > /tmp/blog-draft.md
-
-# Run converter
-node scripts/md-to-portable-text.js /tmp/blog-draft.md
+# Run converter (script lives at agents/seo-content-writer/scripts/ from repo root)
+node agents/seo-content-writer/scripts/md-to-portable-text.js /tmp/blog-draft-$PAPERCLIP_RUN_ID.md
 # Output: JSON array of Portable Text blocks
 ```
 
@@ -59,16 +112,32 @@ fetch POST https://medicodio.ai/api/blog/push
 Headers:
   x-blog-secret: {BLOG_PUSH_SECRET}
   Content-Type: application/json
-Body:
+Body (omit any field whose value is null/undefined — server handles missing fields):
 {
   "title": "{seoTitle}",
   "description": "{seoDescription}",
-  "blogcontent": {blogcontent array}
+  "blogcontent": {blogcontent array},
+  "schema": {schema_resolved},                  // OMIT if null — server falls back to generating BlogPosting
+  "canonicalUrl": "{canonical_url}",
+  "mainImage": "{image_url}",                   // in-post hero
+  "featuredImage": "{social_card_url}",         // OG/Twitter override (Tier 3+; null until then — OMIT)
+  "primaryKeyword": "{primaryKeyword}",
+  "categoryIds": [{categoryIds from current Sanity workflow}]
 }
 → IF response status ≠ 200/201: post blocked "Blog push failed: {status} {body}". STOP.
 → capture response body → publishResponse
 → extract publishResponseId (check response for id, _id, postId, or documentId field)
 ```
+
+**Note on field compatibility (audit 2026-05-11):**
+- `mainImage` matches the existing Sanity schema field on medicodio.ai backend — no aliasing needed.
+- `schema` field: currently the server already injects `BlogPosting` JSON-LD generated from post data (Tier 6.1 partial). The pipeline-sent `schema` field (when Tier 6.1 finishes) will REPLACE the server-generated version, allowing the pipeline to control all fields including pre-resolved image, canonical, keywords. Until then, the server falls back to its own generation.
+- `canonicalUrl`, `primaryKeyword` are new fields — server ignores unknown fields today. After Tier 6.1 ships, they drive `<link rel=canonical>` and `<meta name=keywords>` respectively.
+- If schema needs to include multiple block types (e.g. BlogPosting + FAQPage), use `@graph` array:
+  ```json
+  { "@context": "https://schema.org", "@graph": [ {BlogPosting...}, {FAQPage...} ] }
+  ```
+  The skill currently generates a single BlogPosting object — multi-block extension lands when FAQ/HowTo schema is added in Tier 6.6 or in the [BLOG-IMAGES]/[BLOG-FAQ] phases later.
 
 ## Step 5 — Save portable-text.json
 
@@ -90,10 +159,21 @@ sharepoint_write_file
 **Approver:** {approverEmail}
 **API response:** {HTTP status}
 **publishResponseId:** {id}
+**Canonical URL:** {canonical_url}
 **SEO score at publish:** {seoScore}/100
+**GEO score at publish:** {geo_score}/100
+**Content quality at publish:** {content_quality_score}/100
 **Word count:** {wordCount}
 **Title:** {seoTitle}
 **Description:** {seoDescription}
+**Main image (in-post hero):** {image_url}
+**Featured image (social override):** {social_card_url or "none — using mainImage fallback"}
+**Schema JSON-LD sent:** {true if schema_resolved was non-null in request body, else "false — server fallback active"}
+
+## Schema JSON-LD (resolved)
+```json
+{schema_resolved}
+```
 ---
 ```
 

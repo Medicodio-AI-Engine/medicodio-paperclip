@@ -4712,7 +4712,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     activeRunExecutions.add(run.id);
 
     try {
+    logger.info({ runId, step: "01_enter_try" }, "executeRun trace");
     const agent = await getAgent(run.agentId);
+    logger.info({ runId, step: "02_agent_loaded" }, "executeRun trace");
     if (!agent) {
       await setRunStatus(runId, "failed", {
         error: "Agent not found",
@@ -4955,7 +4957,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       projectEnv: projectContext?.env ?? null,
       secretsSvc,
     });
+    logger.info({ runId, step: "03_before_normalize_config" }, "executeRun trace");
     const resolvedConfig = normalizeAdapterConfigPaths(rawResolvedConfig, { id: agent.id, companyId: agent.companyId });
+    logger.info({ runId, step: "04_config_normalized" }, "executeRun trace");
     const runScopedMentionedSkillKeys = await resolveRunScopedMentionedSkillKeys({
       db,
       companyId: agent.companyId,
@@ -4965,7 +4969,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       resolvedConfig,
       runScopedMentionedSkillKeys,
     );
-    const runtimeSkillEntries = await companySkills.listRuntimeSkillEntries(agent.companyId);
+    logger.info({ runId, step: "04a_before_listRuntimeSkillEntries" }, "executeRun trace");
+    const runtimeSkillEntries = await Promise.race([
+      companySkills.listRuntimeSkillEntries(agent.companyId),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("listRuntimeSkillEntries timeout 15s")), 15_000),
+      ),
+    ]).catch((err) => {
+      logger.error({ err, runId, companyId: agent.companyId }, "listRuntimeSkillEntries failed/timed out — proceeding with empty list");
+      return [];
+    });
+    logger.info({ runId, step: "04b_runtimeSkillEntries_loaded", count: runtimeSkillEntries.length }, "executeRun trace");
     let runtimeConfig = {
       ...effectiveResolvedConfig,
       paperclipRuntimeSkills: runtimeSkillEntries,
@@ -4989,6 +5003,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           workspace: existingExecutionWorkspace,
         })
       : null;
+    logger.info({ runId, step: "05_before_realize_workspace" }, "executeRun trace");
     const executionWorkspace = reusedExecutionWorkspace ?? await realizeExecutionWorkspace({
           base: executionWorkspaceBase,
           config: runtimeConfig,
@@ -5172,6 +5187,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       lease: realizationResult.lease,
     };
     persistedExecutionWorkspace = realizationResult.persistedExecutionWorkspace;
+    logger.info({ runId, step: "06_workspace_realized" }, "executeRun trace");
     const workspaceRealization = realizationResult.workspaceRealization;
     const executionTarget = realizationResult.executionTarget;
     const remoteExecution = realizationResult.remoteExecution;
@@ -5355,6 +5371,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .returning()
         .then((rows) => rows[0] ?? null);
       if (runningWithSession) run = runningWithSession;
+      logger.info({ runId, step: "07_startedAt_updated" }, "executeRun trace");
 
       const runningAgent = await db
         .update(agents)
@@ -5376,12 +5393,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
 
       const currentRun = run;
+      logger.info({ runId, step: "08_before_run_started_event" }, "executeRun trace");
       await appendRunEvent(currentRun, seq++, {
         eventType: "lifecycle",
         stream: "system",
         level: "info",
         message: "run started",
       });
+      logger.info({ runId, step: "09_run_started_event_appended" }, "executeRun trace");
 
       handle = await runLogStore.begin({
         companyId: run.companyId,
@@ -5532,6 +5551,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           "local agent jwt secret missing or invalid; running without injected PAPERCLIP_API_KEY",
         );
       }
+      logger.info({ runId, step: "10_before_adapter_execute" }, "executeRun trace");
       const adapterResult = await adapter.execute({
         runId: run.id,
         agent,

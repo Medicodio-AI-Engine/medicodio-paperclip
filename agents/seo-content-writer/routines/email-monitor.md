@@ -15,9 +15,9 @@ GET /api/agents/me → agentId, companyId
 GET /api/agents/me/inbox-lite → find this routine's execution issue
 POST /api/issues/{issueId}/checkout
 
-sharepoint_read_file path="SEO-Content-Writer/config.md"
+sharepoint_read_file path="SEO-Content-Writer/agent-state.json"
 → parse activeRunFolder
-→ IF activeRunFolder is empty or missing:
+→ IF file missing or activeRunFolder is empty:
    PATCH issue → done, "No active run. Exiting." EXIT.
 ```
 
@@ -26,7 +26,7 @@ sharepoint_read_file path="SEO-Content-Writer/config.md"
 ```
 sharepoint_read_file path="{activeRunFolder}/run-state.json"
 → IF missing: PATCH issue → done, "run-state.json not found at {path}. Clearing activeRunFolder."
-  → sharepoint_write_file config.md with activeRunFolder=""
+  → sharepoint_write_file path="SEO-Content-Writer/agent-state.json" content: { "activeRunFolder": "" }
   EXIT.
 
 → extract: status, conversationId, messageId, lastCheckedAt,
@@ -78,11 +78,21 @@ START OVER:
 CHANGES REQUESTED:
 - Any substantive reply that is not an approval signal
 
-Use the LAST non-skipped reply if multiple replies exist (most recent decision wins).
+**Classification priority (first APPROVED wins):**
+- If ANY non-skipped reply is APPROVED → outcome is APPROVED. Do not evaluate later messages.
+- If NO reply is APPROVED → use the LAST non-skipped reply as the outcome (most recent request wins).
+
+This prevents a follow-up question after "Approved" from reverting the approval.
 
 ## Step 5a — If APPROVED
 
+**Write state FIRST, then create child. If child creation fails and monitor retries, state check in Step 2 will exit cleanly.**
+
 ```
+sharepoint_read_file path="{activeRunFolder}/run-state.json"
+→ update status = "publish_queued"
+sharepoint_write_file  ← WRITE BEFORE creating child issue
+
 POST /api/companies/{companyId}/issues
 Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
 {
@@ -94,17 +104,19 @@ Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
   "priority": "high"
 }
 
-sharepoint_read_file path="{activeRunFolder}/run-state.json"
-→ update status = "publish_queued"
-sharepoint_write_file
-
 PATCH issue → done, "Reply classified as APPROVED. [BLOG-PUBLISH] child created."
 ```
 
 ## Step 5b — If CHANGES REQUESTED
 
+**Write state FIRST, then create child.**
+
 ```
 reply_message_id = messageId of the reply
+
+sharepoint_read_file path="{activeRunFolder}/run-state.json"
+→ update status = "revision_queued"
+sharepoint_write_file  ← WRITE BEFORE creating child issue
 
 POST /api/companies/{companyId}/issues
 Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
@@ -117,31 +129,37 @@ Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
   "priority": "high"
 }
 
-sharepoint_read_file path="{activeRunFolder}/run-state.json"
-→ update status = "revision_queued"
-sharepoint_write_file
-
 PATCH issue → done, "Reply classified as CHANGES. [BLOG-REVISE] child created. Revision {revisionCount+1}."
 ```
 
 ## Step 5c — If START OVER
 
+**Write state FIRST (including phase resets), then create child.**
+
 ```
 sharepoint_read_file path="{activeRunFolder}/run-state.json"
-→ reset: revisionCount = 0, status = "running"
-sharepoint_write_file
+→ reset:
+  revisionCount = 0
+  status = "running"
+  phases.write = "pending"
+  phases.seo_check = "pending"
+  phases.email = "pending"
+  write = null
+  seo_check = null
+  email = null
+sharepoint_write_file  ← WRITE BEFORE creating child issue
 
 POST /api/companies/{companyId}/issues
 {
   "title": "[BLOG-WRITE] {topic} (restart)",
-  "description": "phase_file: routines/bi-weekly-blog-post/write.md\nrun_state_path: {activeRunFolder}/run-state.json\nparent_issue_id: {parentIssueId}\nnote: start_over — research.md already exists, skip to write",
+  "description": "phase_file: routines/bi-weekly-blog-post/write.md\nrun_state_path: {activeRunFolder}/run-state.json\nparent_issue_id: {parentIssueId}\nnote: start_over — research.md already exists, use it as context",
   "assigneeAgentId": "{agentId}",
   "parentId": "{parentIssueId}",
   "status": "todo",
   "priority": "high"
 }
 
-PATCH issue → done, "Reply: START OVER. RevisionCount reset to 0. New [BLOG-WRITE] child created."
+PATCH issue → done, "Reply: START OVER. RevisionCount reset to 0. Phases write/seo_check/email reset to pending. New [BLOG-WRITE] child created."
 ```
 
 ---
@@ -150,8 +168,7 @@ PATCH issue → done, "Reply: START OVER. RevisionCount reset to 0. New [BLOG-WR
 
 | Situation | Action |
 |---|---|
-| config.md missing | PATCH done, exit |
-| activeRunFolder empty | PATCH done, exit |
-| run-state.json missing | PATCH done, clear activeRunFolder, exit |
+| agent-state.json missing or activeRunFolder empty | PATCH done, exit |
+| run-state.json missing | PATCH done, clear agent-state.json activeRunFolder, exit |
 | Outlook list fails | Post warning, PATCH done — try next 6h cycle |
 | Child issue creation fails | Retry once. Post blocked on self if still fails |

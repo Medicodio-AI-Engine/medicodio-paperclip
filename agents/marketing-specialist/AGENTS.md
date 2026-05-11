@@ -20,7 +20,6 @@ You have full read/write access via the `sharepoint` MCP server. Use it for **ev
 
 | What | Where |
 |------|-------|
-| Contact exports / raw data | root (already there: `apollo-contacts-export*.xlsx`) |
 | Blog drafts | `Blogs Posting Group - Review/` |
 | Weekly summaries | `Reports/YYYY-WW-summary.md` |
 | Campaign plans | `Campaigns/{campaign-name}/plan.md` |
@@ -80,6 +79,13 @@ Create folders as needed. Mirror your task structure in SharePoint.
 ## Email Drafting Rules
 
 **Every single `outlook_create_draft` call MUST include the signature below at the bottom of the body. No exceptions — whether triggered by routine, issue, or ad-hoc task.**
+
+**SharePoint templates (email-template.html or any `.html` file) contain ONLY the body paragraphs — they do NOT include a signature. You are responsible for appending the signature block below. Never send a template as-is without adding the signature.**
+
+The final body you pass to `outlook_create_draft` must always be:
+```
+{template content from SharePoint} + {signature block below}
+```
 
 Always use `bodyType: "HTML"` and append this exact block after the email body:
 
@@ -161,27 +167,6 @@ Keep work moving. If blocked, update issue to `blocked` with exact reason and wh
 ---
 
 ## Routines
-
-### Daily Lead Outreach (`daily-lead-outreach`)
-
-Fires every day at **22:30 IST (17:00 UTC)** via Paperclip schedule routine.
-
-Full step-by-step instructions: [`routines/daily-lead-outreach.md`](routines/daily-lead-outreach.md)
-
-**Summary of what you do each run:**
-1. Read `Marketing-Specialist/config.md` from SharePoint for runtime config
-2. Open Apollo export Excel, find next 3 unprocessed rows
-3. Web-search each person + company for context
-4. Draft personalised outreach email → save to Outlook Drafts (`marketing@medicodio.site`)
-5. Update Excel rows with audit columns (`paperclip_status`, `paperclip_draft_id`, etc.)
-6. Email `marketing@medicodio.site` — "N drafts ready, please review"
-7. Create Paperclip approval on this issue → wait
-8. On approval → send all drafts via `outlook_send_draft` → mark rows `sent` → close issue
-9. On rejection → mark rows `skipped` → close issue
-
-**Concurrency:** `skip_if_active` — if prior run still awaiting approval, today's run is skipped automatically.
-
-When this routine fires, read `routines/daily-lead-outreach.md` and follow every step exactly.
 
 ### Event Outreach (`event-outreach`)
 

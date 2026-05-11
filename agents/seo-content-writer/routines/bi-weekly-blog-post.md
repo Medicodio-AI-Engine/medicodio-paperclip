@@ -18,6 +18,7 @@ When assigned an issue whose title starts with one of these prefixes, read the m
 | `[BLOG-RESEARCH]` | `routines/bi-weekly-blog-post/research.md` |
 | `[BLOG-WRITE]` | `routines/bi-weekly-blog-post/write.md` |
 | `[BLOG-SEO-CHECK]` | `routines/bi-weekly-blog-post/seo-check.md` |
+| `[BLOG-SEO-IMPROVE]` | `routines/bi-weekly-blog-post/seo-improve.md` |
 | `[BLOG-EMAIL]` | `routines/bi-weekly-blog-post/email.md` |
 | `[BLOG-REVISE]` | `routines/bi-weekly-blog-post/revise.md` |
 | `[BLOG-PUBLISH]` | `routines/bi-weekly-blog-post/publish.md` |
@@ -49,10 +50,14 @@ Set issue → `blocked`. STOP.
 
 ```
 sharepoint_read_file path="SEO-Content-Writer/config.md"
-→ IF missing: create it with default keyword cluster (see AGENTS.md) + empty posted_log + empty activeRunFolder. Continue.
-→ parse posted_log — check if topic already appears
-→ IF duplicate found:
-   POST comment: "Topic '{topic}' already published on {date}. Skipping to avoid duplicate content."
+→ IF missing: create it with default keyword cluster (see AGENTS.md) + empty posted_log. Continue.
+
+→ Normalize topic to slug for dedup:
+  topic_slug = topic.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')
+
+→ parse posted_log — for each entry, compare topic_slug against entry.slug (normalized match, not raw title match)
+→ IF duplicate slug found:
+   POST comment: "Topic slug '{topic_slug}' matches already-published entry '{entry.topic}' ({entry.published_at}). Skipping to avoid duplicate content."
    PATCH issue → done. STOP.
 ```
 
@@ -116,12 +121,15 @@ sharepoint_write_file path="{runStatePath}" content="{JSON}"
 → IF fails: post blocked "Cannot write run-state.json to {runStatePath}. Check SharePoint permissions." STOP.
 ```
 
-### Step 5 — Update config.md activeRunFolder
+### Step 5 — Write agent-state.json
+
+Write the runtime state to a dedicated file (separate from config.md which holds static keyword cluster):
 
 ```
-sharepoint_read_file path="SEO-Content-Writer/config.md"
-→ update: activeRunFolder = "{runFolder}"
-sharepoint_write_file path="SEO-Content-Writer/config.md" content="{updated}"
+sharepoint_write_file
+  path="SEO-Content-Writer/agent-state.json"
+  content: { "activeRunFolder": "{runFolder}" }
+→ IF fails: post warning, continue (non-blocking — email-monitor uses this to find the run)
 ```
 
 ### Step 6 — Post bootstrap comment
@@ -169,7 +177,7 @@ Do not research. Do not write. Do not run SEO checks. Do not send email. Do not 
 | Situation | Action |
 |---|---|
 | `topic:` missing from description | Block parent, STOP |
-| Topic already in posted log | Close as done, STOP |
+| Topic slug already in posted log | Close as done, STOP |
 | run-state.json write fails | Block parent, STOP |
-| config.md update fails | Post warning, continue (non-blocking) |
+| agent-state.json write fails | Post warning, continue (non-blocking) |
 | Child issue creation fails | Retry once. Block parent with error on second failure |

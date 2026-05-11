@@ -9,6 +9,21 @@
   Each row in `need_email_rows[]` is treated as if it is the only row. No exceptions.
   The domain field in each row object is the ONLY valid prior-domain source for that row.
 
+**ENFORCEMENT (not prose — required tracking):**
+  Maintain in-memory `search_log[]` for the batch — one entry per WebSearch call:
+    `{ excel_row, company_normalized, query, first_result_url, result_url_sha256, resolved_domain }`
+  where `company_normalized = company.strip().lower()` and `result_url_sha256` is the hash of
+  the URL string used to derive the domain.
+  Before recording a new entry, run BOTH guards:
+    GUARD-1 (per-row salt): query MUST include row-specific salt — see ROW-STEP-A. If a query
+    string is repeated verbatim within the batch, the call is invalid — re-run with the salt.
+    GUARD-2 (cross-row hash collision): IF a new entry's `result_url_sha256` matches any prior
+    entry's `result_url_sha256` AND `company_normalized` differs → REJECT the resolved_domain.
+    Mark the row `pc_status="domain_not_found"`, `pc_notes="hash collision with row {N} — likely
+    hallucinated reuse"`. Do NOT proceed to ROW-STEP-B for this row.
+  This catches the silent failure mode where the model recycles a previously seen URL/domain
+  instead of running a fresh search.
+
 **STATE:** Reads `batch_loader.need_email_rows[]` from run-state.json. Writes `enricher` section.
 **CREATES NEXT:** `[EO-SENDER]` child issue.
 **DO NOT:** Send emails. Read Excel for batch data — all row data is in run-state.json.
@@ -50,9 +65,15 @@ For EACH row — execute ALL 4 ROW-STEPS in strict order. Never skip a row-step.
 
 **ELSE — run WebSearch (BUILT-IN, NOT DDG):**
 ```
-WebSearch query: '"{company}" official website'
+WebSearch query: '"{company}" official website -site:linkedin.com row:{excel_row}'
+  ← `row:{excel_row}` is a per-row salt. It does not match any operator most engines honor,
+     so it is effectively ignored by ranking but makes the query string unique per row.
+     This forces a fresh tool invocation and prevents "I already know this" reuse.
 → take hostname from first non-aggregator result URL
 → strip www. and path → keep registrable domain + TLD → resolved_domain
+→ append entry to `search_log[]` with company_normalized, query, first_result_url,
+  result_url_sha256, resolved_domain
+→ run GUARD-2 (see top of file). IF collision detected → REJECT and treat as domain_not_found.
 
 TLD handling:
   - Simple TLD: careers.stripe.com → stripe.com

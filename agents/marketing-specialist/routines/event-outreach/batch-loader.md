@@ -1,6 +1,6 @@
 # Batch Loader — Config + Batch Selection (PHASE 0 + PHASE 1)
 
-**WARNING LINE 1:** `last_row` MUST come from `{first_name_col}1:{first_name_col}2000`. NEVER from pc_status column. pc_status column only covers already-processed rows — it is far smaller than true attendee count.
+**WARNING LINE 1:** `last_row` MUST come from the `first_name_col` chunked scan defined in Step 3. NEVER from pc_status column. pc_status column only covers already-processed rows — it is far smaller than true attendee count. Hard cap: 10000 rows. Past that → HALT with operator notice (do not silently truncate).
 **STATE:** Config already in run-state.json from orchestrator. Do NOT re-read config.md from SharePoint.
 **CREATES NEXT:** `[EO-ENRICHER]` if need_email rows exist. `[EO-SENDER]` directly if all rows have email.
 **DO NOT:** Run Hunter. Send emails. Re-read config.md.
@@ -34,9 +34,22 @@ sharepoint_excel_read_range
   address="A1:ZZ1"
 → identify column letters for all canonical fields (use inference rules from column-map.md if cached)
 
-sharepoint_excel_read_range address="{first_name_col}1:{first_name_col}2000"
-→ count non-empty cells (excluding header) → last_row   ← THIS IS THE TRUE LAST ROW
+last_row = 0
+chunk_start = 1
+LOOP (max 5 iterations → covers rows 1..10000):
+  end = chunk_start + 1999
+  sharepoint_excel_read_range address="{first_name_col}{chunk_start}:{first_name_col}{end}"
+  → count non-empty cells in chunk (exclude header only when chunk_start == 1) → chunk_count
+  → last_row += chunk_count
+  → IF cell at row {end} is empty → break (true tail of data inside this chunk)
+  → IF end >= 10000 → HALT, post blocked:
+       "Attendee file exceeds 10000 rows — split file or raise the cap in batch-loader.md.
+        Refusing to silently truncate." STOP.
+  chunk_start = end + 1
+END LOOP
 ```
+Rationale: a single 1:2000 read silently truncates files with >2000 attendees. Iterate in
+2000-row chunks until an empty tail is seen, with a hard 10000-row cap that fails loudly.
 
 ## Step 4 — Load or generate column map
 

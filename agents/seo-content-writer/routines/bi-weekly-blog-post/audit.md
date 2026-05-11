@@ -19,7 +19,10 @@ parent_issue_id = extract from issue description
 sharepoint_read_file path="{run_state_path}"
 → parse full JSON
 → IF status ≠ "published":
-   post warning comment "run-state.json status is '{status}', expected 'published'. Proceeding with audit anyway."
+   POST /api/issues/{PAPERCLIP_TASK_ID}/comments
+   { "body": "BLOCKED: run-state.json status is '{status}', expected 'published'. Pipeline cannot close — post was not published. Verify the [BLOG-PUBLISH] phase completed successfully and status is 'published' before retrying audit." }
+   PATCH /api/issues/{PAPERCLIP_TASK_ID} { "status": "blocked" }
+   STOP.
 ```
 
 ## Step 2 — Write audit.md
@@ -72,9 +75,13 @@ sharepoint_read_file path="SEO-Content-Writer/config.md"
     published_at: {publishedAt}
     publish_response_id: {publishResponseId}
     seo_score: {seoScore}
-→ clear activeRunFolder: set to ""
 sharepoint_write_file path="SEO-Content-Writer/config.md" content="{updated}"
 → IF fails: post warning comment but continue — do NOT block on config update failure.
+
+sharepoint_write_file
+  path="SEO-Content-Writer/agent-state.json"
+  content: { "activeRunFolder": "" }
+→ IF fails: post warning comment but continue.
 ```
 
 ## Step 4 — Post final comment on parent and close

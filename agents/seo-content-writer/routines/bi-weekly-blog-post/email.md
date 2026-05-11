@@ -20,6 +20,14 @@ run_state_path = extract from issue description
 parent_issue_id = extract from issue description
 
 sharepoint_read_file path="{run_state_path}"
+→ extract: phases.email
+
+→ IF phases.email == "done":
+   post comment "Idempotency: email already sent in a prior run. Ensuring parent is in_review."
+   PATCH /api/issues/{parent_issue_id} { "status": "in_review" }
+   PATCH /api/issues/{PAPERCLIP_TASK_ID} Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID { "status": "done", "comment": "Idempotency: email already sent. Parent set to in_review." }
+   EXIT.
+
 → extract: topic, primaryKeyword, category, approverEmail, runFolder, seoScore, wordCount, write.draft_path
 
 sharepoint_read_file path="{runFolder}/logs/seo-check.md"

@@ -4,12 +4,11 @@
 
 | Routine | Schedule | File |
 |---------|----------|------|
-| Daily Lead Outreach | 22:30 IST daily (17:00 UTC) | [daily-lead-outreach.md](daily-lead-outreach.md) |
 | Event Outreach | Manual (per event) | [event-outreach.md](event-outreach.md) |
 
 ---
 
-## Setup: Register Daily Lead Outreach in Paperclip
+## Setup: Register a routine in Paperclip
 
 Run once as board operator after the marketing-specialist agent exists in your company.
 
@@ -36,8 +35,8 @@ curl -X POST http://localhost:3100/api/companies/{companyId}/routines \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer {token}" \
   -d '{
-    "title": "Daily Lead Outreach",
-    "description": "Read Apollo CSV, research leads, draft outreach emails, await approval, send on approval.",
+    "title": "{Routine Title}",
+    "description": "Read agents/marketing-specialist/routines/{routine-file}.md and follow every step.",
     "assigneeAgentId": "{marketingSpecialistAgentId}",
     "projectId": "{projectId}",
     "priority": "medium",
@@ -49,7 +48,9 @@ curl -X POST http://localhost:3100/api/companies/{companyId}/routines \
 
 Save the returned `routineId`.
 
-### Step 3 — Add schedule trigger (10:30 PM IST = 17:00 UTC)
+### Step 3 — Add schedule trigger
+
+Cron expression in UTC. IST → UTC: subtract 5h 30m.
 
 ```bash
 curl -X POST http://localhost:3100/api/routines/{routineId}/triggers \
@@ -59,24 +60,11 @@ curl -X POST http://localhost:3100/api/routines/{routineId}/triggers \
     "kind": "schedule",
     "cronExpression": "30 17 * * *",
     "timezone": "UTC",
-    "label": "22:30 IST daily"
+    "label": "{schedule label}"
   }'
 ```
 
-### Step 4 — Create Marketing-Specialist config in SharePoint
-
-Create file `Marketing-Specialist/config.md` in SharePoint with:
-
-```markdown
-# Marketing Specialist Config
-
-apollo_file: apollo-contacts-export.xlsx
-batch_size: 3
-review_email: marketing@medicodio.site
-outlook_user: marketing@medicodio.site
-```
-
-### Step 5 — Test with manual run
+### Step 4 — Test with manual run
 
 ```bash
 curl -X POST http://localhost:3100/api/routines/{routineId}/run \
@@ -88,8 +76,6 @@ curl -X POST http://localhost:3100/api/routines/{routineId}/run \
 ---
 
 ## Modifying the schedule
-
-To change trigger time (e.g. move to 9 AM IST = 03:30 UTC):
 
 ```bash
 curl -X PATCH http://localhost:3100/api/routine-triggers/{triggerId} \
@@ -110,4 +96,8 @@ curl -X PATCH http://localhost:3100/api/routines/{routineId} \
 # Resume
 curl -X PATCH http://localhost:3100/api/routines/{routineId} \
   -d '{"status": "active"}'
+
+# Archive (retire permanently)
+curl -X PATCH http://localhost:3100/api/routines/{routineId} \
+  -d '{"status": "archived"}'
 ```

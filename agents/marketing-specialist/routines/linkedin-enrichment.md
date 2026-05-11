@@ -569,7 +569,7 @@ o. Progress log every 10 rows:
         └── YYYY-MM-DD-linkedin-enrichment.md  ← per-run summary log
 ```
 
-The Excel file lives at the **root** of the MedicodioMarketing site (same location as Apollo export files). The run log is written under `Marketing-Specialist/run-logs/` to keep it consistent with the daily-lead-outreach routine's log structure.
+The Excel file lives at the **root** of the MedicodioMarketing site. The run log is written under `Marketing-Specialist/run-logs/`.
 
 ---
 

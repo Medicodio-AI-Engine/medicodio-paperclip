@@ -17,10 +17,40 @@ parent_issue_id = extract from issue description
 
 sharepoint_read_file path="{run_state_path}"
 → IF missing: post blocked "run-state.json not found at {run_state_path}." STOP.
-→ extract: topic, primaryKeyword, contentBrief, research.must_include_sections,
+→ extract: phases.write
+
+→ IF phases.write == "done":
+   post comment "Idempotency: write already completed in a prior run. Creating [BLOG-SEO-CHECK] child and exiting."
+   Go directly to Step 7.
+
+→ extract remaining fields: topic, primaryKeyword, contentBrief, research.must_include_sections,
   research.content_gaps, research.paa_questions, research.recommended_angle,
   runFolder, approverEmail, category
 ```
+
+## Step 1b — GEO / AI Citation Writing Guidelines
+
+**Skill reference:** `agents/skills/seo-content-analysis.md` Part 2 defines the GEO scoring criteria applied in [BLOG-SEO-CHECK]. Apply these patterns while writing so the draft scores well without a separate fix pass.
+
+**Apply throughout the draft:**
+
+1. **Answer-first per section:** Begin each H2 with a direct 1-sentence answer to the implied question before elaborating. Example: "AI medical coding automates code assignment using NLP models trained on clinical notes." — then expand.
+
+2. **134–167 word self-contained answer blocks:** At least 3 section openings should stand alone as complete mini-answers — extractable by AI without surrounding context.
+
+3. **Question-based H2/H3 headings:** Where natural, phrase headings as reader questions. Example: "How Does AI Medical Coding Work?" instead of "AI Medical Coding Process".
+
+4. **"What is {topic}?" definition in first 80 words of body:** Open the body (after H1 and hook) with a clear definition: "{primaryKeyword} is..." or "{topic} refers to...".
+
+5. **Statistics with attribution:** Include at least 2 specific data points with named sources. Example: "According to AAPC, AI coding tools reduce claim denial rates by up to 40%."
+
+6. **FAQ section:** The `## FAQ` H2 already in the structure below satisfies this. Use `### Q: ...` headings with direct 2–4 sentence answers.
+
+7. **Comparison table:** Where the topic involves comparisons (AI vs human coders, before vs after), add a markdown table.
+
+These patterns increase selection probability by Google AI Overviews, ChatGPT, and Perplexity without replacing keyword density — both matter.
+
+---
 
 ## Step 2 — Write the blog post
 

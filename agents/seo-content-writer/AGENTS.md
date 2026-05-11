@@ -12,7 +12,8 @@ All files under `SEO-Content-Writer/`:
 
 ```
 SEO-Content-Writer/
-├── config.md                              ← keyword cluster, posted log, activeRunFolder
+├── config.md                              ← keyword cluster + posted log (static config — never write activeRunFolder here)
+├── agent-state.json                       ← runtime state: { "activeRunFolder": "..." } (written by orchestrator, cleared by audit)
 └── agents/
     └── seo-blogs/
         └── runs/
@@ -32,12 +33,15 @@ SEO-Content-Writer/
 
 **config.md tracks:**
 - Keyword cluster (canonical list — load before every SEO check)
-- Posted topics log (check before starting any new run — no duplicates)
-- `activeRunFolder` — path to current in-progress run folder. Set by orchestrator, cleared by audit phase. Email monitor reads this to find run-state.json.
+- Posted topics log (check before starting any new run — no duplicates by slug)
+
+**agent-state.json tracks:**
+- `activeRunFolder` — path to current in-progress run folder. Set by orchestrator on bootstrap. Cleared by audit phase. Email monitor reads this to find run-state.json. Kept separate from config.md to avoid read-modify-write races on the keyword cluster.
 
 ### On every new task
 1. `sharepoint_list_folder path="SEO-Content-Writer"` — orient yourself
-2. `sharepoint_read_file path="SEO-Content-Writer/config.md"` — load cluster + posted log + activeRunFolder
+2. `sharepoint_read_file path="SEO-Content-Writer/config.md"` — load keyword cluster + posted log
+3. `sharepoint_read_file path="SEO-Content-Writer/agent-state.json"` — load activeRunFolder (runtime state)
 
 ---
 
@@ -59,6 +63,7 @@ No context — including recovery prompts, continuation summaries, or prior run 
 | `[BLOG-RESEARCH]` | `routines/bi-weekly-blog-post/research.md` |
 | `[BLOG-WRITE]` | `routines/bi-weekly-blog-post/write.md` |
 | `[BLOG-SEO-CHECK]` | `routines/bi-weekly-blog-post/seo-check.md` |
+| `[BLOG-SEO-IMPROVE]` | `routines/bi-weekly-blog-post/seo-improve.md` |
 | `[BLOG-EMAIL]` | `routines/bi-weekly-blog-post/email.md` |
 | `[BLOG-REVISE]` | `routines/bi-weekly-blog-post/revise.md` |
 | `[BLOG-PUBLISH]` | `routines/bi-weekly-blog-post/publish.md` |
@@ -147,8 +152,11 @@ PAPERCLIP_AGENT_ID, PAPERCLIP_COMPANY_ID, PAPERCLIP_RUN_ID, PAPERCLIP_TASK_ID
 
 - **Phase routing is mandatory** — never execute phase logic without reading the mapped phase file first.
 - **run-state.json is the single source of truth** — read it at the start of every phase, append your section, write it back.
-- **Never duplicate topics** — check config.md posted log before starting any run.
+- **Never duplicate topics** — check config.md posted log (by slug, not raw title) before starting any run.
 - **Checkout before any work** — Paperclip rule, no exceptions.
-- **Always CC naveen@medicodio.ai** — no exceptions on email sends.
+- **Always CC naveen@medicodio.ai** — no exceptions on email sends OR revision email replies.
 - **Never hardcode SharePoint URLs** — always use `sharepoint_get_file_info` for `webUrl`.
 - **X-Paperclip-Run-Id header on all mutating API calls** — required for audit trail.
+- **agent-state.json for runtime state** — activeRunFolder lives in agent-state.json, never in config.md. This prevents config corruption on concurrent read-modify-write.
+- **Idempotency guard at every phase start** — check phases.{this_phase} in run-state.json. If already "done", skip all work and proceed directly to child issue creation. This handles safe retries when a heartbeat crashes after state write but before child creation.
+- **State before child** — always write run-state.json update (phases.{this_phase} = "done") BEFORE creating the next child issue. If the write succeeds but child creation fails, the idempotency guard handles the retry safely without re-running expensive work.
