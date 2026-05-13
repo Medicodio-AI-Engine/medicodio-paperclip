@@ -1,0 +1,47 @@
+name: Sync upstream master
+
+on:
+  schedule:
+    # 06:30 UTC = 12:00 IST (Asia/Kolkata)
+    - cron: '30 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout medicodio/prod
+        uses: actions/checkout@v4
+        with:
+          ref: medicodio/prod
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/paperclipai/paperclip.git
+          git fetch upstream master --tags
+
+      - name: Mirror upstream/master to origin/upstream-master
+        run: |
+          git push origin "refs/remotes/upstream/master:refs/heads/upstream-master" --force
+
+      - name: Merge upstream/master into medicodio/prod
+        run: |
+          set -e
+          git merge --no-edit upstream/master
+
+      - name: Push medicodio/prod
+        run: git push origin medicodio/prod
