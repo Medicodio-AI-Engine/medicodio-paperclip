@@ -1,1112 +1,436 @@
-# Employee Onboarding Routine
+# Employee Onboarding — Orchestrator
 
-**Trigger:** API-triggered — fired by HR agent heartbeat when onboarding issue detected, or manually  
-**Concurrency policy:** `always_enqueue` — each employee is a separate independent run  
-**Catch-up policy:** `skip_missed`
+**Trigger:** API-triggered (HR agent heartbeat detected an onboarding issue) or manual via Paperclip.
+**Concurrency policy:** `always_enqueue` — each employee is a separate independent run.
+**Catch-up policy:** `skip_missed`.
 
----
+**Role:** Bootstrap pipeline only. Phase 0 routing → validate payload → seed run-state.json → create first child issue. EXIT.
 
-## Global Conventions
-
-- **Timestamps:** All timestamps MUST be ISO-8601 UTC format: `YYYY-MM-DDTHH:MM:SSZ` (e.g. `2026-04-23T09:15:00Z`). Never use local time or ambiguous formats.
-- **Audit-log:** Every event MUST append a full 12-column CSV row to `HR-Onboarding/audit-log.csv`. See Audit Log Format section.
-- **CSV append pattern:** `sharepoint_read_file path="HR-Onboarding/audit-log.csv"` → append new pipe-delimited line → `sharepoint_write_file path="HR-Onboarding/audit-log.csv"` with full updated content. Delimiter is `|`. Never use comma as delimiter.
-- **Government ID masking:** Never output, log, or include in any email the digits of Aadhaar, PAN, or any government ID. Use placeholders only: "Aadhaar received ✓", "PAN card on file". Use `[REDACTED]` if you must reference a specific ID in an exception note.
-- **HTML emails:** All emails sent by this routine MUST use `isHtml: true`. Never send plain text.
-- **Binary file uploads (CRITICAL):** When uploading PDFs, images, or any non-text file from Outlook to SharePoint, ALWAYS use `sharepoint_transfer_from_outlook` — one call with messageId + attachmentId + destPath. It streams bytes server-side; binary never enters the context window. NEVER use `outlook_read_attachment` + `sharepoint_upload_binary` for files — base64 gets truncated for anything over ~75 KB.
-- **`outlook_read_attachment` — two completely different contexts, opposite rules:**
-  - ✅ **Phase 5 validation — MANDATORY:** Call `outlook_read_attachment` on EVERY image and PDF before running any check. This is the only way Claude can visually inspect document content. Skipping this call = the document was never validated. Filename and size alone are NOT validation.
-  - ❌ **Phase 9 upload — NEVER:** Do not use `outlook_read_attachment` for uploading to SharePoint. Use `sharepoint_transfer_from_outlook` instead. The NEVER rule above applies exclusively to Phase 9 uploads — it does NOT apply to Phase 5 validation.
+**DO NOT:** Execute any Phase 1–10 logic. Do not create SharePoint folders, send emails, copy templates, or process replies in this file. All phase work happens in `employee-onboarding/{phase-file}.md`.
 
 ---
 
-## Inputs — Where to Read Them
+## Phase Routing — Title Prefix Gate (FIRST CHECK ON EVERY WAKE)
 
-**CRITICAL — read order (do NOT skip steps):**
+When you wake, look at the current Paperclip issue title prefix BEFORE any other action.
 
-1. Check `PAPERCLIP_WAKE_PAYLOAD_JSON` env var first. If present, parse it and extract the `payload` field — all employee data lives there when fired by heartbeat or API.
-2. If `PAPERCLIP_WAKE_PAYLOAD_JSON` is absent or has no `payload`, call `GET /api/issues/{PAPERCLIP_TASK_ID}/heartbeat-context` and extract employee fields from the run payload embedded in the context.
-3. If still no employee data found, scan the issue body for `employee_full_name:`, `employee_email:` etc. key-value lines.
-4. If none of the above yield the required fields → post blocked comment listing missing fields, notify `human_in_loop_email` (or escalate via chain of command if that is also missing), STOP.
+| Title prefix | Read this file | Do NOT read this orchestrator |
+|---|---|---|
+| `[HR-ONBOARD]` | `routines/employee-onboarding.md` (this file) — continue below | — |
+| `[HR-VALIDATE-INPUTS]` | `routines/employee-onboarding/validate-inputs.md` | ✗ |
+| `[HR-SEND-INITIAL]` | `routines/employee-onboarding/send-initial.md` | ✗ |
+| `[HR-AWAIT-REPLY]` | `routines/employee-onboarding/await-reply.md` | ✗ |
+| `[HR-PROCESS-REPLY]` | `routines/employee-onboarding/process-reply.md` | ✗ |
+| `[HR-ONBOARDING-REPLY]` (legacy) | `routines/employee-onboarding/process-reply.md` | ✗ |
+| `[HR-VALIDATE-DOCS]` | `routines/employee-onboarding/validate-docs.md` | ✗ |
+| `[HR-REQUEST-RESUB]` | `routines/employee-onboarding/request-resubmission.md` | ✗ |
+| `[HR-COMPLETE-SUB]` | `routines/employee-onboarding/complete-submission.md` | ✗ |
+| `[HR-UPLOAD-SP]` | `routines/employee-onboarding/upload-sharepoint.md` | ✗ |
+| `[HR-CLOSE]` | `routines/employee-onboarding/close-case.md` | ✗ |
 
-**Never assume the issue description contains employee data.** Paperclip creates execution issues with the routine's static description — employee data comes from the run payload.
+**If the current issue title starts with any `[HR-*]` prefix OTHER THAN `[HR-ONBOARD]`:**
+Read the mapped phase file immediately. Follow ONLY that file. Do NOT continue reading this orchestrator. Do NOT re-bootstrap run-state.json. Do NOT re-create folders.
 
-### Required fields
-| Field | Description |
+**If the current issue has no prefix or starts with `[HR-ONBOARD]`:** proceed with the orchestrator steps below.
+
+**Backward-compat — payload-based legacy routing:** if the issue title has no `[HR-*]` prefix AND the run payload has `source: "api"` AND `messageId` is present, treat this wake as `[HR-PROCESS-REPLY]` — read `routines/employee-onboarding/process-reply.md` and follow it. Do NOT bootstrap a new run-state.json.
+
+**Special case — heartbeat reply on a parked `[HR-AWAIT-REPLY]` issue:** if the title is `[HR-AWAIT-REPLY]` AND the payload also contains `messageId` (heartbeat injected a reply onto a parked phase issue rather than creating a new `[HR-PROCESS-REPLY]` child), route to `routines/employee-onboarding/process-reply.md`. Treat as if the title were `[HR-PROCESS-REPLY]`. Do NOT execute `await-reply.md`. This catches the race where the heartbeat reused the await-reply issue.
+
+**Legacy `[HR-ONBOARDING-REPLY]` prefix:** route to `routines/employee-onboarding/process-reply.md` (see `_shared.md § §14` — listed in the routing table as the legacy alias for `[HR-PROCESS-REPLY]`).
+
+---
+
+## Shared conventions
+
+All conventions (audit-log format, status table, ID masking, timestamps, HTML rule, binary upload rule, run-state.json schema, case-tracker.md schema, child issue description format, failure handling) live in:
+
+```
+routines/employee-onboarding/_shared.md
+```
+
+All email and Teams notification HTML bodies live in:
+
+```
+routines/employee-onboarding/_email-templates.md
+```
+
+This orchestrator references those files by section. It MUST NOT duplicate their content.
+
+---
+
+## Orchestrator Steps (fresh `[HR-ONBOARD]` trigger only)
+
+### Step 0 — Confirm this is a fresh trigger
+
+If you reached this step, the issue title starts with `[HR-ONBOARD]` (or no prefix and no `messageId` in payload). Continue.
+
+If `source` and `messageId` came in via payload but the title prefix did NOT match a phase prefix above, that is a configuration error. Post a blocked comment on this issue:
+
+```
+POST /api/issues/{PAPERCLIP_TASK_ID}/comments
+{
+  "body": "Configuration error — issue has no [HR-*] title prefix but payload contains messageId. Cannot infer phase. Human must fix issue title or routine config."
+}
+```
+
+→ Notify `human_in_loop_email` if known from payload. STOP.
+
+### Step 1 — Read employee data from payload
+
+Read order (do NOT skip steps):
+
+1. Check `PAPERCLIP_WAKE_PAYLOAD_JSON` env var. If present, parse it, extract `payload` field.
+2. If absent or `payload` empty: `GET /api/issues/{PAPERCLIP_TASK_ID}/heartbeat-context` (see `_shared.md § §19`). Extract employee fields from the run payload embedded in the response.
+3. If still no employee data: scan the issue body for `employee_full_name:`, `employee_email:` etc. key-value lines (legacy compat path).
+4. If none yielded the required base fields → post blocked comment listing the missing fields, notify `human_in_loop_email` if known (otherwise escalate via the team chain of command), STOP.
+
+**FULL required-field validation (orchestrator now blocks early to avoid wasted scaffolding):**
+
+| Field | Required | Notes |
+|---|---|---|
+| `employee_full_name` | yes | non-empty |
+| `employee_email` | yes | non-empty, must contain `@` |
+| `role` | yes | non-empty |
+| `employee_type` | yes | MUST be one of: `intern`, `fresher`, `fte`, `experienced`, `contractor`, `rehire`. (`intern_fte_form` is deprecated — see `AGENTS.md`.) |
+| `date_of_joining` | yes | ISO `YYYY-MM-DD` |
+| `recruiter_or_hr_name` | yes | non-empty |
+| `recruiter_or_hr_email` | yes | non-empty, must contain `@` |
+| `human_in_loop_name` | yes | non-empty |
+| `human_in_loop_email` | yes | non-empty, must contain `@` |
+
+**Optional fields** (Phase 1 inspects but does not block on): `phone_number`, `alternate_candidate_email`, `date_of_birth` (ISO), `permanent_address`, `temporary_address`, `hiring_manager_name`, `hiring_manager_email`, `business_unit`, `location`, `joining_mode`, `notes_from_hr`, `special_document_requirements`.
+
+**Validation behavior:**
+- If `employee_type` value is missing OR not in the allowed list → send `_email-templates.md § §UNKNOWN_EMPLOYEE_TYPE_ALERT` to `human_in_loop_email` (if known), post blocked comment, STOP. Do NOT create run-state.json.
+- If any OTHER required field is missing → post blocked comment listing the specific missing fields, notify `human_in_loop_email` (if known), STOP. Do NOT create run-state.json.
+- This early validation prevents wasted scaffolding (folders, Excel copy, run-state, child issue) for payloads that Phase 1 would reject anyway.
+
+### Step 2 — Compute case_id and SharePoint paths
+
+```
+case_id        = "{employee_email}-{date_of_joining}"           ← see _shared.md § §11
+base_folder    = "HR-Onboarding/{employee_full_name} - {date_of_joining}"
+run_state_path = "{base_folder}/run-state.json"
+case_tracker_path = "{base_folder}/case-tracker.md"
+```
+
+### Step 3 — Idempotency check (rehire collision per _shared.md § §11)
+
+```
+sharepoint_list_folder path="HR-Onboarding"
+→ does folder "{employee_full_name} - {date_of_joining}" already exist?
+```
+
+**Branch A — folder does NOT exist:** proceed to Step 4 with `case_id` unchanged.
+
+**Branch B — folder exists AND no run-state.json inside it:** treat as orphaned scaffold. Proceed with `case_id` unchanged.
+
+**Phase 1 reconcile contract for Branch B:** `validate-inputs.md` Step 5 MUST call `sharepoint_get_file_info` on `case_tracker_path` FIRST. If a pre-existing `case-tracker.md` is found, Phase 1 MUST escalate (notify human, do NOT overwrite). This protects against losing prior-run state when an orphan folder contained a case-tracker.md but no run-state.json. The orchestrator only checks for run-state.json here; case-tracker.md detection is Phase 1's responsibility.
+
+**Branch C — folder exists AND run-state.json exists AND case_id status is NOT terminal** (terminal = `completed`, `cancelled`, `withdrawn`, `stalled`, `escalated`):
+→ This is a duplicate workflow trigger for an ACTIVE case. Post blocked comment:
+
+```
+"Active onboarding case already in progress for {employee_full_name} (case_id: {case_id}, current_phase: {x}, run-state: {run_state_path}). Refusing to bootstrap a duplicate run. If this trigger is intentional, manually update or cancel the existing case first."
+```
+
+→ Notify `human_in_loop_email` via plain `outlook_send_email` (subject: `HR Alert: Duplicate onboarding trigger blocked — {employee_full_name}`). STOP.
+
+---
+
+### Step 3.5 — Audit-log scan for cross-case duplicates (CRITICAL — runs AFTER Branch A/B/C/D)
+
+Folder-name check above only catches collisions where `employee_full_name + date_of_joining` matches EXACTLY. It does NOT catch the case where the SAME person was onboarded earlier with:
+- a slightly different name (`Sameer Mansur` vs `Sameer S Mansur`), or
+- a typo'd email that has since been corrected (`gmai.com` vs `gmail.com`), or
+- mixed case / extra whitespace in either name or email.
+
+Run this scan AFTER Branch A/B/C/D — even Branch A (folder doesn't exist) must run this check, because a duplicate may exist under a DIFFERENT folder name.
+
+#### Normalization helpers
+
+```
+norm_email(s)        = trim(lowercase(s))
+norm_name(s)         = trim(collapse_consecutive_whitespace(lowercase(s)))
+levenshtein(a, b)    = standard edit distance (insertions + deletions + substitutions)
+```
+
+`collapse_consecutive_whitespace` replaces runs of `\s+` with a single space, then strips leading/trailing space.
+
+#### Scan logic
+
+```
+sharepoint_read_file path="HR-Onboarding/audit-log.csv"
+  → IF file missing: create with header row per _shared.md § §3, continue (no collisions possible since no prior cases).
+  → ELSE parse pipe-delimited rows; skip header.
+
+Group rows by case_id. For each case_id, capture the LATEST row's:
+  - current_status (column 8)
+  - employee_email (column 3)
+  - employee_full_name (column 4)
+
+Build active_cases = [
+  { case_id, latest_status, employee_email, employee_full_name }
+  for each case_id where latest_status NOT IN: completed, cancelled, withdrawn, stalled, escalated, blocked, escalated_approval_timeout
+]
+
+candidate = {
+  norm_email_X = norm_email(payload.employee_email)
+  norm_name_X  = norm_name(payload.employee_full_name)
+  norm_date_X  = payload.date_of_joining   ← already ISO
+}
+
+collisions = []
+FOR each c in active_cases:
+  // Skip aggregate / non-case rows: heartbeat_tick + heartbeat_skip rows often carry case_id = "—".
+  IF c.case_id == "—" OR c.case_id is empty: continue
+
+  // Parse case_id with rehire-aware regex from _shared.md § §11:
+  //   /^(.+@.+)-(\d{4}-\d{2}-\d{2})(?:-rehire-(\d+))?$/
+  // Match groups → (email_Y, date_Y, rehire_N).
+  IF case_id does NOT match the regex: continue   // malformed legacy row — skip rather than crash
+
+  email_Y, date_Y, rehire_N = parsed groups
+  norm_email_Y = norm_email(email_Y)
+  norm_name_Y  = norm_name(c.employee_full_name)
+  norm_date_Y  = date_Y
+
+  IF norm_date_Y == norm_date_X:
+      reason = null
+      IF norm_email_Y == norm_email_X: reason = "exact_email_match"
+      ELSE IF levenshtein(norm_email_Y, norm_email_X) <= 2: reason = "typo_distance_email"
+      ELSE IF norm_name_Y == norm_name_X: reason = "exact_name_match"
+      ELSE IF levenshtein(norm_name_Y, norm_name_X) <= 2: reason = "typo_distance_name"
+      ELSE IF norm_name_Y starts with norm_name_X OR norm_name_X starts with norm_name_Y:
+             reason = "name_prefix_overlap"   ← catches "Sameer Mansur" vs "Sameer S Mansur"
+
+      IF reason is not null:
+        collisions.append({ case_id: c.case_id, reason, latest_status: c.latest_status })
+```
+
+#### Branch on collisions
+
+**If `collisions` is empty:** proceed to Step 4 (write run-state.json).
+
+**If `collisions` is non-empty:** treat as a duplicate workflow attempt — block:
+
+```
+1. Post blocked comment on this issue:
+   "Active onboarding case already exists for what appears to be the same candidate.
+    Collisions found:
+    {for each c in collisions: <li>case_id={c.case_id} (current_status={c.latest_status}) — reason: {c.reason}</li>}
+
+    Refusing to bootstrap a new run. If this trigger is intentional (true rehire / different person / etc.),
+    either cancel the existing case(s) OR re-trigger with payload-level flag `skip_dedup: true`."
+
+2. outlook_send_email to human_in_loop_email (template _email-templates.md § §DUPLICATE_WORKFLOW_ALERT — see below):
+   subject: HR Alert: Duplicate onboarding workflow blocked — {employee_full_name}
+   body: include the same collision list + suggestion to resolve
+
+3. Append to HR-Onboarding/audit-log.csv per _shared.md § §4:
+   {now}|—|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|blocked|duplicate_workflow_detected|Orchestrator blocked — collision(s) with active case(s)|{collisions joined: case_id=X reason=Y; case_id=Z reason=W}|{PAPERCLIP_TASK_ID}
+   ← case_id column is "—" because we refuse to commit to a new case_id when a duplicate is suspected.
+
+4. STOP. Do NOT create run-state.json. Do NOT create any child issue.
+```
+
+#### Bypass via `skip_dedup`
+
+If `payload.skip_dedup == true` (set by HR when re-triggering after confirming the new case is genuinely separate): skip the entire Step 3.5 scan, log the bypass in audit-log brief_reason, proceed to Step 4. Use sparingly — only when the existing case(s) genuinely refer to a different person/event.
+
+**Branch D — folder exists AND run-state.json exists AND case_id status IS terminal `completed`:**
+→ Rehire collision. Resolve per `_shared.md § §11`:
+- Loop suffix `-rehire-1`, `-rehire-2`, … until a non-existent folder is found.
+- New `case_id = "{employee_email}-{date_of_joining}-rehire-{N}"`
+- Recompute `base_folder`, `run_state_path`, `case_tracker_path` with the new case_id (folder name stays `{employee_full_name} - {date_of_joining}-rehire-{N}`).
+- `outlook_send_email` using template `_email-templates.md § §REHIRE_COLLISION_ALERT` to `human_in_loop_email` BEFORE Step 4.
+
+### Step 4 — Write initial run-state.json
+
+Use the schema in `_shared.md § §12`. Initial content:
+
+```json
+{
+  "schema_version": 1,
+  "case_id": "{case_id}",
+  "parent_issue_id": "{PAPERCLIP_TASK_ID}",
+  "base_folder": "{base_folder}",
+  "run_state_path": "{run_state_path}",
+  "case_tracker_path": "{case_tracker_path}",
+  "created_at": "{ISO now}",
+  "last_updated": "{ISO now}",
+  "current_phase": "validate_inputs",
+  "phases_complete": ["orchestrator"],
+  "payload": {
+    "employee_full_name": "...",                                  // required (orchestrator already validated)
+    "employee_email": "...",                                      // required
+    "role": "...",                                                // required
+    "employee_type": "intern|fresher|fte|experienced|contractor|rehire",  // required
+    "date_of_joining": "YYYY-MM-DD",                              // required
+    "recruiter_or_hr_name": "...",                                // required
+    "recruiter_or_hr_email": "...",                               // required
+    "human_in_loop_name": "...",                                  // required
+    "human_in_loop_email": "...",                                 // required
+    "phone_number": "{value or null}",                            // optional
+    "alternate_candidate_email": "{value or null}",               // optional
+    "date_of_birth": "{ISO or null}",                             // optional
+    "permanent_address": "{value or null}",                       // optional
+    "temporary_address": "{value or null}",                       // optional
+    "hiring_manager_name": "{value or null}",                     // optional
+    "hiring_manager_email": "{value or null}",                    // optional — used by heartbeat 14-day escalation if present
+    "business_unit": "{value or null}",                           // optional
+    "location": "{value or null}",                                // optional
+    "joining_mode": "{value or null}",                            // optional
+    "notes_from_hr": "{value or null}",                           // optional
+    "special_document_requirements": "{value or null}"            // optional — §INITIAL_CONTRACTOR consumes this
+  },
+  "reminders": {
+    "nudge_1_sent_at": null,
+    "nudge_2_sent_at": null
+  },
+  "orchestrator": {
+    "status": "complete",
+    "completed_at": "{ISO now}",
+    "rehire_resolution": "{none | -rehire-1 | -rehire-2 | ...}"
+  }
+}
+```
+
+**Top-level paths (CRITICAL — phase files read these instead of recomputing):**
+- `base_folder`: full path including rehire suffix if any. Example: `HR-Onboarding/Jane Doe - 2026-05-01-rehire-1`.
+- `run_state_path`: `{base_folder}/run-state.json`.
+- `case_tracker_path`: `{base_folder}/case-tracker.md`.
+
+**IMPORTANT:** all required-list fields above were validated in Step 1 — write them as-is, no `null`. Only OPTIONAL fields may be `null`. Phase files trust these paths and field types.
+
+Folder may not exist yet (Phase 1 creates the subfolders). The base folder MUST exist before we write run-state.json:
+
+```
+sharepoint_create_folder parentPath="HR-Onboarding" folderName="{employee_full_name} - {date_of_joining}{rehire_suffix or ""}"
+→ IF this returns "already exists" AND we are in Branch B/D → proceed (expected).
+→ IF this fails for any other reason → post blocked comment "Cannot create base folder at {base_folder}. Error: {error}". STOP.
+```
+
+Then:
+
+```
+sharepoint_write_file path="{run_state_path}" content="{JSON above}"
+→ IF write fails: retry once after 3s.
+→ IF still fails: post blocked comment "Cannot write run-state.json to {run_state_path}. Check SharePoint permissions. Error: {error}". STOP.
+```
+
+### Step 5 — Seed audit-log
+
+Append to `HR-Onboarding/audit-log.csv` per `_shared.md § §3` and `§4`. All required fields are present (Step 1 validated them), so no em-dashes are needed:
+
+```
+{now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|initiated|case_created|Orchestrator bootstrapped — run-state.json written. Pipeline handed to validate-inputs.|rehire={rehire_resolution}|{PAPERCLIP_TASK_ID}
+```
+
+**Note:** `event = case_created` maps to `current_status = initiated` per the §5 status transition table. Use exactly those values.
+
+### Step 6 — Post comment on this issue
+
+```
+POST /api/issues/{PAPERCLIP_TASK_ID}/comments
+Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
+{
+  "body": "Orchestrator complete. case_id={case_id}. run_state_path={run_state_path}. Creating [HR-VALIDATE-INPUTS] child for Phase 1."
+}
+```
+
+### Step 7 — Create the `[HR-VALIDATE-INPUTS]` child issue (idempotent)
+
+**Step 7a — Idempotency check (handles orchestrator retry):**
+
+If Step 4 + Step 5 + Step 6 succeeded on a prior wake but Step 7 failed, the heartbeat / Paperclip may retry this orchestrator wake. We MUST NOT create a duplicate `[HR-VALIDATE-INPUTS]` child.
+
+```
+GET /api/companies/{PAPERCLIP_COMPANY_ID}/issues?parentId={PAPERCLIP_TASK_ID}&title-prefix=[HR-VALIDATE-INPUTS]
+→ IF any open issue (status ∈ {todo, in_progress, in_review}) is returned:
+   - Reuse that issue id as validate_inputs_issue_id.
+   - Post comment "Step 7 idempotent — existing [HR-VALIDATE-INPUTS] child {id} found; not creating a duplicate."
+   - Skip Step 7b and continue to Step 8.
+→ ELSE: proceed to Step 7b.
+```
+
+**Step 7b — Create the child:**
+
+```
+POST /api/companies/{PAPERCLIP_COMPANY_ID}/issues
+Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
+{
+  "title": "[HR-VALIDATE-INPUTS] {employee_full_name} — Phase 1 input validation",
+  "description": "phase_file: routines/employee-onboarding/validate-inputs.md\nrun_state_path: {run_state_path}\nparent_issue_id: {PAPERCLIP_TASK_ID}\ncase_id: {case_id}",
+  "assigneeAgentId": "{PAPERCLIP_AGENT_ID}",
+  "parentId": "{PAPERCLIP_TASK_ID}",
+  "status": "todo",
+  "priority": "high"
+}
+→ IF creation fails: retry once. If still fails: post blocked comment "Failed to create [HR-VALIDATE-INPUTS] child: {error}". STOP — do NOT mark orchestrator as done. (Heartbeat will not re-attempt this — humans must.)
+→ Store returned issue id as validate_inputs_issue_id.
+```
+
+### Step 8 — Mark orchestrator issue as in_review and exit
+
+**Checkpoint:** only run this step if Steps 1–7 all succeeded. If ANY prior step posted a `blocked` comment or hit a STOP path, you MUST NOT reach Step 8 — the orchestrator issue stays `in_review` (its initial state) or `blocked` per the prior step's failure handling, NOT in `in_review` as set by this step.
+
+```
+PATCH /api/issues/{PAPERCLIP_TASK_ID}
+Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
+{
+  "status": "in_review",
+  "comment": "Pipeline bootstrapped. [HR-VALIDATE-INPUTS] child created (issue: {validate_inputs_issue_id}). This orchestrator issue stays in_review while phases run; final status update happens after Phase 10."
+}
+```
+
+**Do not execute any further phase logic.** Phase 1 will create case-tracker.md (including the Phase Tracker table). The orchestrator does NOT touch case-tracker.md — it does not yet exist.
+
+Exit heartbeat. ✓
+
+---
+
+## Failure handling for the orchestrator
+
+| Situation | Action |
 |---|---|
-| `employee_full_name` | Full name |
-| `employee_email` | Primary email |
-| `role` | Job role/designation |
-| `employee_type` | `intern` \| `fresher` \| `fte` \| `experienced` \| `contractor` \| `rehire` |
-| `date_of_joining` | Confirmed joining date (ISO format) |
-| `recruiter_or_hr_name` | HR/recruiter name |
-| `recruiter_or_hr_email` | HR/recruiter email |
-| `human_in_loop_name` | Human reviewer name |
-| `human_in_loop_email` | Human reviewer email |
-| `phone_number` | Candidate's contact phone number |
+| Required base fields missing in payload | Post blocked comment, notify `human_in_loop_email` if known, STOP |
+| Base folder create fails | Post blocked comment with error, STOP |
+| `run-state.json` write fails after retry | Post blocked comment on this issue, STOP — do NOT create child |
+| Active duplicate workflow detected (Branch C) | Post blocked comment + notify human, STOP |
+| Rehire collision (Branch D) | Resolve case_id with `-rehire-N` suffix, notify human, continue |
+| `[HR-VALIDATE-INPUTS]` child create fails after retry | Post blocked comment, STOP — do NOT mark orchestrator done |
+| Audit-log seed row fails | Notify human, set this issue → blocked, STOP |
 
-### Optional
-`alternate_candidate_email`, `date_of_birth` (ISO format, e.g. `1995-06-15` — used for doc identity verification in Phase 5), `hiring_manager_name`, `hiring_manager_email`, `business_unit`, `location`, `joining_mode`, `notes_from_hr`, `special_document_requirements`
+For every failure above: this orchestrator issue stays in_review or blocked. It MUST NOT transition to `done` unless Step 7 succeeded.
 
 ---
 
-## SharePoint Base Path
+## What this orchestrator does NOT do
 
-```
-HR-Onboarding/{employee_full_name} - {date_of_joining}/
-```
-
----
-
-## Case ID (Idempotency)
-
-Unique case = `{employee_email}-{date_of_joining}`  
-Example: `jane.doe@example.com-2026-05-01`
-
-**Before starting:**
-1. `sharepoint_list_folder path="HR-Onboarding"` → check if folder `{employee_full_name} - {date_of_joining}` exists
-2. If YES and case is active → do not duplicate; continue existing case
-3. If YES and case is `completed` → check if this is a rehire (see Rehire Collision below)
-4. If NO → proceed to Phase 1
-
-### Rehire Collision Handling
-
-If a `completed` case already exists for `{employee_email} + {date_of_joining}` (same person, same date — rare but possible), the idempotency key collides.
-
-Resolution:
-- Suffix the case ID with `-rehire-{N}` where N starts at 1 and increments (e.g. `jane.doe@example.com-2026-05-01-rehire-1`)
-- Check if `-rehire-1` also exists; if so, try `-rehire-2`, and so on
-- Notify `human_in_loop_email` immediately:
-  - subject: `HR Alert: Same-date rehire case detected for {employee_full_name}`
-  - body: `<p>A completed onboarding case already exists for <strong>{employee_full_name}</strong> ({employee_email}) with joining date {date_of_joining}.</p><p>A new case is being created as a rehire with Case ID: {new_case_id}. Please confirm this is intended before proceeding.</p>`
-- Use the suffixed case ID for all audit-log rows and SharePoint paths for this run
+- Validate the full required-field list — that is Phase 1 (`validate-inputs.md`).
+- Create SharePoint subfolders (`01_Raw_Submissions`, etc.) — Phase 1.
+- Copy the HRMS Excel template — Phase 1.
+- Create or write `case-tracker.md` — Phase 1.
+- Send any emails to the candidate — Phase 2 (`send-initial.md`).
+- Process candidate replies — Phase 4 (`process-reply.md`, triggered by heartbeat).
+- Run document validation — Phase 5 (`validate-docs.md`, invokes the document-validator skill).
+- Create Paperclip approvals — Phase 7+8 (`complete-submission.md`).
+- Upload to SharePoint Verified folder — Phase 7+8 auto-upload or Phase 9 fallback.
+- Send completion or IT setup emails — Phase 10 (`close-case.md`).
 
 ---
 
-## Status Model
+## Status on exit (orchestrator)
 
-Update issue comment on every status change.
+Per `_shared.md § §21`. The orchestrator is Phase 0 — it routes input, creates the `[HR-VALIDATE-INPUTS]` child, and exits.
 
-`initiated` → `initial_email_sent` → `awaiting_document_submission` → `candidate_acknowledged` → `partial_submission_received` → `complete_submission_received` → `under_automated_review` → `discrepancy_found` → `awaiting_resubmission` → `awaiting_human_verification` → `verified_by_human` → `sharepoint_upload_in_progress` → `uploaded_to_sharepoint` → `completed`
+| Outcome | This issue (`[HR-ONBOARD]`) | Notes |
+|---|---|---|
+| Input parsed + Phase 1 child created | **`in_progress`** | Acts as the parent for the whole pipeline. Status will be advanced by downstream phases per the case-status mapping in `_shared.md § §21`. |
+| Required input field(s) missing or malformed | `blocked` | Comment names the missing fields; human re-files with corrected inputs. |
+| Pre-existing active workflow on same `case_id` (Branch C) | `blocked` with link to the existing parent | Do NOT cancel either side. |
+| Paperclip API call to create child failed | `blocked` | Human re-triggers. |
 
-Exception statuses: `stalled` | `escalated` | `withdrawn` | `cancelled`
-
----
-
-## Status Transition Rules
-
-Every audit-log row MUST use the `current_status` value from this table for the given event. Never guess — use exactly the value listed here.
-
-| Event | `current_status` to write |
-|-------|--------------------------|
-| `case_created` | `initiated` |
-| `initial_email_sent` | `initial_email_sent` |
-| `awaiting_reply` | `awaiting_document_submission` |
-| `candidate_acknowledged` | `candidate_acknowledged` |
-| `reminder_1_sent` | `awaiting_document_submission` |
-| `reminder_2_sent` | `awaiting_document_submission` |
-| `reply_detected` | `awaiting_document_submission` |
-| `reply_from_alternate_sender` | `awaiting_document_submission` |
-| `partial_submission_received` | `partial_submission_received` |
-| `complete_submission_received` | `complete_submission_received` |
-| `under_automated_review` | `under_automated_review` |
-| `discrepancy_found` | `discrepancy_found` |
-| `resubmission_requested` | `awaiting_resubmission` |
-| `human_notified` | current status unchanged — do not update |
-| `human_approved` | `verified_by_human` |
-| `sharepoint_folder_created` | `initiated` |
-| `files_uploaded` | `uploaded_to_sharepoint` |
-| `case_completed` | `completed` |
-| `case_stalled` | `stalled` |
-| `case_cancelled` | `cancelled` |
-| `case_withdrawn` | `withdrawn` |
-| `escalated` | `escalated` |
-| `heartbeat_tick` | current status unchanged |
-
----
-
-## PHASE 0 — Source routing gate
-
-**This is the first thing the routine checks on every trigger.**
-
-```
-Step 1. Check issue title prefix first.
-
-─── PATH A: [HR-ONBOARDING-REPLY] ────────────────────────────────────────
-IF issue title starts with "[HR-ONBOARDING-REPLY]":
-  → This is a heartbeat-created reply sub-issue — do NOT run Phase 1/2/3
-  → Read ALL fields from issue description (key-value lines):
-      case_id, employee_email, employee_full_name, employee_type,
-      date_of_joining, recruiter_or_hr_name, recruiter_or_hr_email,
-      human_in_loop_email, current_status, parent_issue_id
-      Optional: phone_number, alternate_candidate_email
-  → Parse messageIds field: split by comma → messageId_list (chronological order)
-  → reply_count = length of messageId_list
-
-  For each messageId in messageId_list (oldest first):
-    Set messageId = current entry
-    Execute PHASE 4 logic for this messageId
-      → PHASE 5 (document validation)
-      → IF discrepancies found → PHASE 6 (resubmission email) → STOP loop
-         (heartbeat will detect the next candidate reply and create a new sub-issue)
-      → IF no discrepancies AND all mandatory docs present → continue to next messageId
-    After each message: update case-tracker and audit-log before processing next messageId
-
-  After all messageIds in list are processed:
-    → IF all mandatory docs complete → proceed to PHASE 8 (human verification)
-    → IF still partial → remain; parent issue stays in_review for heartbeat to detect next reply
-
-  Do NOT re-create SharePoint folders, re-send initial emails, or re-log case_created.
-  SKIP Phase 1 / Phase 2 / Phase 3 entirely.
-
-─── PATH B: Payload-based routing (backward compat / direct routine trigger) ───────
-Step 1b. Read `source` and `messageId` from the run payload
-         (PAPERCLIP_WAKE_PAYLOAD_JSON → payload field).
-
-IF source == "api" AND messageId is present (non-empty string):
-  → This is a heartbeat-triggered reply run — do NOT run Phase 1/2/3
-  → Extract from payload: case_id, messageId, employee_email, employee_full_name,
-    employee_type, recruiter_or_hr_name, recruiter_or_hr_email,
-    human_in_loop_email, date_of_joining, current_status, phone_number
-  → Skip Phase 1, Phase 2, Phase 3 entirely
-  → Jump directly to PHASE 4 — Process candidate reply
-  → (Do NOT re-create folders, re-send emails, or re-log case_created)
-
-IF source == "manual" OR (source == "api" AND messageId is absent or empty):
-  → This is a fresh onboarding trigger
-  → Proceed to PHASE 1 — Validate inputs
-```
-
----
-
-## PHASE 1 — Validate inputs
-
-```
-Step 2. Parse all required fields from payload.
-
-Step 2a. If phone_number is missing or empty:
-   → outlook_send_email to employee_email
-     subject: "Quick Detail Required – Onboarding for {employee_full_name}"
-     isHtml: true
-     body: <p>Hi {employee_full_name},</p><p>We are initiating your onboarding process. Could you please share your contact phone number at the earliest so we can update our records?</p><p>Please reply to this email with your phone number.</p><p>Regards,<br>{recruiter_or_hr_name}</p>
-   → Set phone_number = "pending — requested via email"
-   → Post issue comment: "phone_number missing — email sent to {employee_email} requesting it. Proceeding with onboarding."
-   → Continue to Step 3 (do NOT stop)
-
-Step 3. If employee_type not in allowed list (intern, fresher, fte, experienced, contractor, rehire):
-   → outlook_send_email to human_in_loop_email
-     subject: "HR Alert: Unknown employee_type for {employee_full_name}"
-     isHtml: true
-     body: <p>Hi,</p><p>Cannot proceed with onboarding for <strong>{employee_full_name}</strong> — unrecognized employee_type: <strong>{value}</strong>.</p><p>Please correct the issue type and re-trigger the routine.</p><p>Regards,<br>HR Automation</p>
-   → Append to audit-log.csv (CSV append pattern):
-     {now}|{case_id}|{employee_email}|{employee_full_name}|unknown|{human_in_loop_email}|{recruiter_or_hr_name}|escalated|escalated|Stopped — unknown employee_type|employee_type={value}
-   → STOP
-
-Step 4. If employee_type == rehire:
-   → outlook_send_email to human_in_loop_email
-     subject: "HR Alert: Rehire case — {employee_full_name}"
-     isHtml: true
-     body: <p>Hi,</p><p>A rehire onboarding case has been created for <strong>{employee_full_name}</strong> ({employee_email}).</p><p>Please confirm whether prior documents can be reused, or if a full new submission is required. Reply to this email to proceed.</p><p>Regards,<br>HR Automation</p>
-   → Await reply before sending full document request
-   → Documents required for rehire: Resume, Updated Address, Address Proof, Updated PAN/Aadhaar if changed, Full Name, Email, DOB
-
-Step 5. Set status = initiated
-
-Step 6. sharepoint_create_folder parentPath="HR-Onboarding" folderName="{employee_full_name} - {date_of_joining}"
-
-Step 7. sharepoint_create_folder parentPath="HR-Onboarding/{employee_full_name} - {date_of_joining}" folderName="01_Raw_Submissions"
-
-Step 8. sharepoint_create_folder parentPath="HR-Onboarding/{employee_full_name} - {date_of_joining}" folderName="02_Verified_Documents"
-
-Step 9. sharepoint_create_folder parentPath="HR-Onboarding/{employee_full_name} - {date_of_joining}" folderName="03_Exception_Notes"
-
-Step 9a. Copy HRMS Excel template to employee folder:
-    sharepoint_copy_file
-      sourcePath     = "hr-onboarding/templates/EmployeeSheet_Onboarding_Form_Medicodio_HRMS.xlsx"
-      destFolderPath = "HR-Onboarding/{employee_full_name} - {date_of_joining}"
-      newName        = "EmployeeSheet_{employee_full_name}.xlsx"
-    → CRITICAL: Store the `webUrl` from the copy response immediately as {excel_url}. Do NOT use the template's URL.
-    → On failure: notify human_in_loop_email, STOP.
-
-Step 9b. Confirm copy is valid:
-    → If size = 0 or webUrl missing: notify human_in_loop_email, STOP.
-
-Step 10. Append to audit-log (CSV append pattern):
-    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|initiated|case_created|Onboarding case initialised — folders created in SharePoint|—|{PAPERCLIP_TASK_ID}
-
-Step 11. Create per-employee case tracker:
-    sharepoint_write_file
-    path="HR-Onboarding/{employee_full_name} - {date_of_joining}/case-tracker.md"
-    content:
-    ---
-    # Onboarding Case Tracker — {employee_full_name}
-    **CASE STATUS: IN PROGRESS**
-
-    | Field | Value |
-    |-------|-------|
-    | Name | {employee_full_name} |
-    | Email | {employee_email} |
-    | Phone | {phone_number} |
-    | Role | {role} |
-    | Type | {employee_type} |
-    | Joining Date | {date_of_joining} |
-    | HR Contact | {recruiter_or_hr_name} |
-    | HR Contact Email | {recruiter_or_hr_email} |
-    | Case ID | {case_id} |
-    | HRMS Form URL | {excel_url} |
-
-    ## Status History
-    | Timestamp | Status | Notes |
-    |-----------|--------|-------|
-    | {now} | initiated | Case created |
-
-    ## Document Tracker
-    (Updated automatically at each submission. Status: pending / received / verified / rejected / uploaded)
-
-    | Document | Required | Status | Submitted At | Issues | Verified |
-    |----------|----------|--------|-------------|--------|---------|
-    {document_rows_by_employee_type}
-
-    ## Identity Verification
-    | Check | Result | Notes |
-    |-------|--------|-------|
-    | Name on documents matches candidate | pending | — |
-    | DOB on documents matches provided DOB | pending | — |
-    | Name consistent across all documents | pending | — |
-
-    ## Reminders Sent
-    | Nudge | Sent At | Response |
-    |-------|---------|---------|
-    | Nudge 1 | — | — |
-    | Nudge 2 | — | — |
-
-    ## Attachment Lookup
-    (One row appended per accepted attachment each round. Phase 9 uses the most recent row per filename to re-fetch bytes for docs accepted in earlier runs.)
-
-    | Filename | Message ID | Attachment ID | Content Type | Round |
-    |----------|-----------|---------------|-------------|-------|
-    ---
-```
-
----
-
-## PHASE 2 — Send initial email
-
-**HTML formatting rule:** All emails MUST use `isHtml: true`. Use `<p>` for paragraphs, `<ol><li>` for numbered lists, `<strong>` for bold, `<br>` for signature line breaks.
-
-Select template based on `employee_type`:
-
-### Intern / Fresher template
-
-```
-Subject: Documents Required for Onboarding – {employee_full_name}
-isHtml: true
-Body:
-<p>Hi {employee_full_name},</p>
-<p>Good day!!!</p>
-<p>As discussed, please find below the list of documents that need to be sent as soon as possible.</p>
-<p><strong>List of Documents:</strong></p>
-<ol>
-  <li>Latest Resume</li>
-  <li>Passport Size Photo (Soft Copy)</li>
-  <li>Education Certificates: SSLC to Highest Education</li>
-  <li>PAN Card (Scan Copy)</li>
-  <li>Passport Scan Copy (If Applicable)</li>
-  <li>Permanent and Temporary Address (Detailed Address)</li>
-  <li>Address Proof (Aadhar, DL, or Voter ID). Aadhar Card copy is mandatory.</li>
-</ol>
-<p><strong>Please also share the following details:</strong></p>
-<ul>
-  <li>Full Name</li>
-  <li>Email ID</li>
-  <li>DOB</li>
-</ul>
-<p><strong>Additionally, please fill in and return the HRMS Onboarding Form:</strong></p>
-<p><a href="{excel_url}">Click here to open your HRMS Onboarding Form</a></p>
-<p>Please fill in all fields in the form and send it back along with your documents.</p>
-<p>For any clarifications, please contact the undersigned.</p>
-<p>Regards,<br>{recruiter_or_hr_name}</p>
-```
-
-### FTE / Experienced template
-
-```
-Subject: Documents Required for Onboarding – {employee_full_name}
-isHtml: true
-Body:
-<p>Hi {employee_full_name},</p>
-<p>Good day!!!</p>
-<p>As discussed, please find below the list of documents that need to be sent as soon as possible.</p>
-<p><strong>Required Documents:</strong></p>
-<ol>
-  <li>Highest Qualification Certificate</li>
-  <li>All Companies Offer Letter / Appointment Letter</li>
-  <li>3 Months Payslips</li>
-  <li>All Companies Relieving Letter</li>
-  <li>Aadhar Card (Mandatory)</li>
-  <li>PAN Card</li>
-  <li>Address Proof (Any one: Rental Agreement, Electricity Bill, Gas Bill, Phone Bill)</li>
-</ol>
-<p><strong>Please also share the following details:</strong></p>
-<ul>
-  <li>Full Name</li>
-  <li>Email ID</li>
-  <li>DOB</li>
-</ul>
-<p><strong>Additionally, please fill in and return the HRMS Onboarding Form:</strong></p>
-<p><a href="{excel_url}">Click here to open your HRMS Onboarding Form</a></p>
-<p>Please fill in all fields in the form and send it back along with your documents.</p>
-<p>For any clarifications, please contact the undersigned.</p>
-<p>Regards,<br>{recruiter_or_hr_name}</p>
-```
-
-### Contractor template
-
-```
-Subject: Documents Required for Onboarding – {employee_full_name}
-isHtml: true
-Body:
-<p>Hi {employee_full_name},</p>
-<p>Good day!!!</p>
-<p>Please share the following documents for your onboarding:</p>
-<ol>
-  <li>Latest Resume</li>
-  <li>PAN Card</li>
-  <li>Aadhar Card</li>
-  <li>Address Proof</li>
-  <li>Full Name, Email ID, DOB</li>
-  [IF special_document_requirements is provided AND not empty:
-    <li>Additional requirements: {special_document_requirements}</li>
-  ELSE: omit this item entirely — never output "{special_document_requirements if any}" verbatim]
-</ol>
-<p><strong>Additionally, please fill in and return the HRMS Onboarding Form:</strong></p>
-<p><a href="{excel_url}">Click here to open your HRMS Onboarding Form</a></p>
-<p>Please fill in all fields in the form and send it back along with your documents.</p>
-<p>Regards,<br>{recruiter_or_hr_name}</p>
-```
-
-```
-Step 12. outlook_send_email
-    → to: {employee_email}
-    → ccRecipients: ["{recruiter_or_hr_email}"]
-    → subject + body from template above
-    → isHtml: true
-    → on failure: outlook_send_email to human_in_loop_email immediately, append to audit-log.csv with current_status=escalated, STOP
-
-Step 13. Set status = initial_email_sent
-
-Step 14. Record timestamp of sent email as initial_email_sent_timestamp
-
-Step 15. Append to audit-log.csv (CSV append pattern):
-    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|initial_email_sent|initial_email_sent|Document request email sent|{employee_type} template used
-
-Step 16. Post issue comment: "Initial email sent to {employee_email} at {now}"
-
-Step 17. Update case-tracker Status History:
-    sharepoint_write_file (append row)
-    path="HR-Onboarding/{employee_full_name} - {date_of_joining}/case-tracker.md"
-    → Add row: | {now} | initial_email_sent | Document request email sent to {employee_email} |
-
-Step 17a. Teams notification (non-blocking):
-  teams_send_channel_message
-    teamId    = $TEAMS_HR_TEAM_ID
-    channelId = $TEAMS_HR_CHANNEL_ID
-    contentType = "html"
-    content:
-      🟢 Onboarding Started — {employee_full_name}<br>
-      <br>
-      Role: {role} ({employee_type})<br>
-      Joining: {date_of_joining}<br>
-      Email: {employee_email}<br>
-      HR Contact: {recruiter_or_hr_name}<br>
-      Case: {PAPERCLIP_TASK_ID}<br>
-      <br>
-      Document request email sent. Awaiting candidate submission.
-  If it fails → add "⚠️ Teams notification failed: {error}" to issue comment and continue.
-```
-
----
-
-## PHASE 3 — Awaiting candidate reply (polling owned by heartbeat)
-
-**Email polling is handled externally** by the `email-heartbeat` routine, which runs every 30 minutes.
-
-This routine does **not** poll for replies directly — it resumes when the heartbeat detects a reply and triggers it with `source: "heartbeat_reply_detected"`.
-
-### Nudge thresholds (enforced by heartbeat)
-
-| Time elapsed since last outbound email | Action |
-|----------------------------------------|--------|
-| < 24h | No action — wait |
-| ≥ 24h, no reply | Heartbeat sends Nudge 1, notifies human_in_loop |
-| ≥ 48h, still no reply | Heartbeat sends Nudge 2, notifies human_in_loop |
-| ≥ 72h, still no reply | Heartbeat sets status = stalled, notifies human_in_loop, stops automation |
-
-```
-Step 18. Set status = awaiting_document_submission (if not already set)
-
-Step 18a. Update Paperclip issue status to "in_review":
-    PATCH /api/issues/{PAPERCLIP_TASK_ID}
-    body: { "status": "in_review" }
-    → This signals to the platform that the issue is waiting on an external party (candidate),
-      not actively being worked. Prevents unnecessary liveness wakeups while awaiting reply.
-    → On failure: log warning in issue comment and continue — non-blocking.
-
-Step 19. Append to audit-log.csv (CSV append pattern):
-    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|awaiting_document_submission|awaiting_reply|Routine paused — heartbeat polling active. Issue set to in_review.|Nudge cadence: 24h/48h/stalled at 72h
-
-Step 20. Post issue comment: "Waiting for candidate reply. Issue status set to in_review. Heartbeat polling active (every 30 min). Nudge cadence: Nudge 1 at 24h, Nudge 2 at 48h, stalled at 72h."
-
-Step 21. On heartbeat resume (source = "api" with messageId in payload) → proceed to PHASE 4.
-```
-
-**Note:** If the case reaches `stalled` status, all automated actions stop. Human must manually intervene and update the issue to restart the process.
-
----
-
-## PHASE 4 — Process candidate reply
-
-**Entry point when triggered by heartbeat with `source: "api"` AND `messageId` present in payload.**
-
-Use skill: [`skills/document-validator.md`](../skills/document-validator.md)  
-→ Use `messageId` from payload directly — do NOT call `outlook_search_emails` again  
-→ `outlook_read_email messageId="{messageId}"` → get full body and sender  
-→ `outlook_list_attachments messageId="{messageId}"` → get attachment list  
-→ Match attachments against checklist → decide next action
-
-```
-Step 21a. Set Paperclip issue status back to "in_progress":
-    PATCH /api/issues/{PAPERCLIP_TASK_ID}
-    body: { "status": "in_progress" }
-    → Candidate has replied — routine is actively processing again.
-    → On failure: log warning, continue — non-blocking.
-
-Step 22. Confirm sender is employee_email or alternate_candidate_email.
-    → if neither: outlook_send_email to human_in_loop_email, do not proceed without approval
-    → Append to audit-log.csv (CSV append pattern):
-      {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|awaiting_document_submission|reply_from_alternate_sender|Notified human — reply from unrecognized sender|Sender: {actual_sender}
-
-Step 23. Classify reply:
-    - "Acknowledgement only" (e.g., "noted", "will send by evening", "sending tomorrow"):
-      → set status = candidate_acknowledged
-      → Append to audit-log.csv (CSV append pattern):
-        {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|candidate_acknowledged|candidate_acknowledged|Candidate acknowledged — no documents yet|—
-      → do NOT treat as submission; continue waiting via heartbeat
-    - Partial submission → set status = partial_submission_received → continue to PHASE 5
-    - Complete submission → set status = complete_submission_received → continue to PHASE 5
-    - Question / clarification → outlook_send_email to human_in_loop_email, keep status active
-    - Withdrawal / postponement:
-      → set status = withdrawn
-      → outlook_send_email to human_in_loop_email
-      → Append to audit-log.csv (CSV append pattern):
-        {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|withdrawn|case_withdrawn|Candidate withdrew / postponed|—
-      → STOP
-    - Cancellation:
-      → set status = cancelled
-      → outlook_send_email to human_in_loop_email
-      → Append to audit-log.csv (CSV append pattern):
-        {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|cancelled|case_cancelled|Candidate or HR cancelled onboarding|—
-      → STOP
-
-Step 24. Append to audit-log.csv (CSV append pattern):
-    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{partial_or_complete_status}|{event}|Candidate reply classified: {classification}|{attachment_count} attachments received
-
-Step 25. Post issue comment with classification and what was received.
-
-Step 25a. Teams notification (non-blocking):
-  teams_send_channel_message
-    teamId    = $TEAMS_HR_TEAM_ID
-    channelId = $TEAMS_HR_CHANNEL_ID
-    contentType = "html"
-    content:
-      📄 Documents Received — {employee_full_name}<br>
-      <br>
-      Received: {comma-separated list of received doc names, each with ✓}<br>
-      Missing: {comma-separated list of missing docs, or "None"}<br>
-      Source: Email ({now})<br>
-      Case: {PAPERCLIP_TASK_ID}<br>
-      <br>
-      Proceeding to validation.
-  If it fails → add "⚠️ Teams notification failed: {error}" to issue comment and continue.
-
-Step 25b. Upload all received attachments to Raw Submissions (BEFORE validation):
-  For each attachment from outlook_list_attachments:
-    sharepoint_transfer_from_outlook
-      messageId    = "{messageId}"
-      attachmentId = "{attachmentId}"
-      destPath     = "HR-Onboarding/{employee_full_name} - {date_of_joining}/01_Raw_Submissions/{filename}"
-      mimeType     = "{detected MIME type}"
-    → On HTTP 429 or 503: wait 10 s, retry up to 3 times. On 3rd failure: log warning in issue comment, skip file — do NOT stop validation.
-    → After transfer: sharepoint_get_file_info on destPath — confirm size > 0. If size = 0 or not found: log warning, continue.
-    → If a file with the same name already exists (resubmission): append timestamp suffix before extension — e.g. Aadhaar_2026-04-23T09-15-00Z.pdf
-  Post issue comment: "Raw upload complete — {N} file(s) saved to 01_Raw_Submissions."
-  → This step preserves the original bytes before any validation logic runs. Phase 9 skips re-uploading raw files already transferred here.
-```
-
----
-
-## PHASE 5 — Document checklist validation
-
-**Mandatory docs by type:**
-
-| Type | Mandatory |
-|---|---|
-| intern/fresher | Resume, Photo, Education Certs, PAN, Address (perm+temp), Aadhar, Address Proof, Full Name, Email, DOB, **HRMS Onboarding Form (Excel)** |
-| fte/experienced | Highest Qual Cert, Offer/Appointment Letters, 3 Payslips, Relieving Letters, Aadhar, PAN, Address Proof, Full Name, Email, DOB, **HRMS Onboarding Form (Excel)** |
-| contractor | Resume, PAN, Aadhar, Address Proof, Full Name, Email, DOB, **HRMS Onboarding Form (Excel)** |
-| rehire | Resume, Updated Address, Address Proof, PAN/Aadhar if changed, Full Name, Email, DOB, **HRMS Onboarding Form (Excel)** |
-
-```
-⚠️ INVOKE DOCUMENT VALIDATOR SKILL — MANDATORY. DO THIS FIRST. NO EXCEPTIONS.
-
-Before ANY step below, read and execute the full document-validator skill:
-→ path: agents/hr/skills/document-validator.md
-→ Execute ALL steps in order: Step 1 → Step 2 → Step 3 → Step 3b → Step 3c → Step 3d → Step 3e → Step 4 → Step 5 → Step 6
-→ Pass these caller inputs to the skill:
-   messageId          = {messageId from payload}
-   employee_full_name = {employee_full_name}
-   employee_email     = {employee_email}
-   employee_type      = {employee_type}
-   date_of_joining    = {date_of_joining}
-   date_of_birth      = {date_of_birth if provided, else omit}
-   permanent_address  = {permanent_address if provided, else omit}
-   temporary_address  = {temporary_address if provided, else omit}
-
-→ The skill returns a structured validation result with: checklist, mismatch_flags, identity_checks, validation_summary, decision
-→ Store this result — Steps 26–30 below use it directly
-
-If the skill is not invoked → this entire phase is invalid. Do NOT proceed to Steps 26–30 without a skill result in hand.
-Steps 27–29 below are summaries of what the skill covers — they are NOT a replacement for the skill.
-
-⚠️ MANDATORY — STEP ZERO BEFORE ANY VALIDATION. NO EXCEPTIONS.
-
-Call `outlook_read_attachment` on EVERY attachment before running any check below.
-This is not optional. This is not implied. This must be done explicitly for each file.
-
-For each attachment from `outlook_list_attachments`:
-  outlook_read_attachment
-  → messageId: "{messageId}"
-  → attachmentId: "{attachmentId}"
-
-  File type handling:
-  → image (.jpg/.jpeg/.png/.gif/.webp): Claude vision reads content directly — inspect visually
-  → PDF: use extractedText. If response contains warning: "SCANNED_PDF_NO_TEXT" → scanned image, no text layer → request candidate re-send as JPG/PNG
-  → DOCX: use extractedText
-  → .zip/.rar: do NOT open — flag immediately, ask candidate to re-send unzipped
-
-If ANY attachment is skipped here → ALL validation below is invalid. Do not proceed.
-Log each file read: "Read {filename} — {content type} — {extractedLength or 'visual'}"
-
-⚠️ MANDATORY PHOTO CONSISTENCY CHECK — run immediately after reading all attachments:
-
-Collect every photo found across all attachments:
-  - Photo on Aadhaar card
-  - Passport size photo (if submitted as separate attachment)
-  - Photo on passport (if submitted)
-  - Any other identity document with a photo
-
-If ≥ 2 photos collected:
-  → Compare visually: do all photos appear to be the same person?
-  → If apparent mismatch (different face, clearly different person):
-     → pc_status = BLOCK — `photo_identity_mismatch`
-     → outlook_send_email to human_in_loop_email IMMEDIATELY
-       subject: "HR Alert: Photo mismatch — {employee_full_name}"
-       body: which documents have conflicting photos (no ID digits)
-     → outlook_send_email to employee_email requesting correct photo re-upload
-     → Set status = discrepancy_found
-     → Append to audit-log.csv
-     → DO NOT proceed to Steps 27–29. STOP this validation round.
-  → If photos match → continue to Step 26
-
-Step 26. Append to audit-log.csv (CSV append pattern):
-    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|under_automated_review|under_automated_review|Document validation started — all {N} attachments read via outlook_read_attachment|{N} attachments to review
-
-Step 27. For each received file, check:
-    a. Presence (is it there?)
-    b. File readable / not corrupt
-    c. File matches expected document type
-    d. Required identity fields visible (name, DOB where applicable)
-    e. No obvious name mismatch across documents
-    f. Not password protected
-    g. Not empty attachment
-    h. Not duplicate of already accepted file
-
-    For FTE/experienced also check:
-    - Payslip count appears to be 3 months
-    - Multiple employer docs if expected
-    - Relieving letters not obviously missing
-
-Step 28. Build discrepancy list if any of these are true:
-    - Mandatory doc missing
-    - Unreadable / corrupt scan
-    - Wrong doc uploaded
-    - Missing Full Name / Email / DOB
-    - Aadhar missing when mandatory
-    - PAN missing when mandatory
-    - Password-protected file
-    - Obvious name mismatch
-    - Insufficient pages
-
-    Note: Do NOT claim legal compliance verification. Surface-level checks only.
-    Escalate anything uncertain to human_in_loop_email.
-
-    DATA SENSITIVITY — MANDATORY:
-    Never log, comment, or include in any email the actual digits of Aadhaar, PAN,
-    or any government ID number. Record only: "Aadhaar received ✓", "PAN received ✓".
-
-Step 29. Run identity verification (using document-validator skill Step 3b):
-    Cross-check name and DOB visible on submitted documents against:
-    - employee_full_name from payload
-    - date_of_birth from payload (if provided) or from candidate's email body
-
-    Apply this decision table:
-
-    | Scenario | Outcome | Action |
-    |----------|---------|--------|
-    | Name exact match | pass | No action |
-    | Name differs by middle name / initials only | warning | Flag, notify human_in_loop_email, allow provisional acceptance pending human review |
-    | Name differs significantly (different name) | fail | Add to discrepancy list, notify human immediately, do NOT accept document |
-    | DOB exact match | pass | No action |
-    | DOB missing from document | warning | Flag as warning in identity_checks, note in case-tracker |
-    | DOB mismatch | fail | Add to discrepancy list, notify human immediately |
-    | date_of_birth not provided in payload | skip | Skip DOB check entirely, note "DOB not provided — check skipped" in result |
-
-    identity_check_outcome: pass | warning | fail
-
-    Record result in identity_checks object as per document-validator skill Step 4.
-
-Step 30. Update per-employee case-tracker Document Tracker:
-    sharepoint_write_file (overwrite full file)
-    path="HR-Onboarding/{employee_full_name} - {date_of_joining}/case-tracker.md"
-    → Update each document row: received / verified / rejected / pending
-    → Update Identity Verification section with results from Step 29
-    → Add row to Status History: | {now} | under_automated_review | Validated {N} documents. Present: {X}. Issues: {Y}. identity_check_outcome: {outcome} |
-    → For each attachment in the document-validator result, append a row to the Attachment Lookup table:
-      | {attachment.name} | {attachment.messageId} | {attachment.attachmentId} | {attachment.contentType} | {reply_index} |
-      (reply_index comes from the run payload — use 1 for the first reply, 2 for the second, etc.)
-      Never remove or overwrite existing rows — only append. If the same filename appears again (resubmission), add a new row; Phase 9 will use the most recent row for that filename.
-```
-
----
-
-## PHASE 6 — Handle discrepancies
-
-```
-IF discrepancies found:
-
-Step 31. Append to audit-log.csv (CSV append pattern):
-    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|discrepancy_found|discrepancy_found|{N} discrepancies found|{brief list of issues}
-
-Step 32. outlook_send_email to human_in_loop_email
-    subject: "HR Alert: Discrepancies found — {employee_full_name}"
-    isHtml: true
-    body:
-    <p>Hi,</p>
-    <p>Discrepancies were found during document review for <strong>{employee_full_name}</strong> ({employee_email}).</p>
-    <ul>{discrepancy items as list}</ul>
-    <p>A resubmission request has been sent to the candidate. Case ID: {case_id}</p>
-    <p>Regards,<br>HR Automation</p>
-
-Step 33. outlook_send_email to employee_email
-    subject: "Resubmission Required – Onboarding Documents for {employee_full_name}"
-    isHtml: true
-    body:
-    <p>Hi {employee_full_name},</p>
-    <p>Thank you for sharing your documents.</p>
-    <p>We found some issues. Please re-send or correct the following:</p>
-    <ol>{exact list of missing/incorrect items — never vague, never "some documents are missing"}</ol>
-    <p>Please share corrected documents at the earliest.</p>
-    <p>Regards,<br>{recruiter_or_hr_name}</p>
-
-Step 34. Append to audit-log.csv (CSV append pattern):
-    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|awaiting_resubmission|resubmission_requested|Resubmission email sent to candidate|{N} items to correct
-
-Step 35. Update case-tracker Status History:
-    → Add row: | {now} | awaiting_resubmission | Resubmission requested — {N} items. |
-
-Step 35a. Teams notification (non-blocking):
-  teams_send_channel_message
-    teamId    = $TEAMS_HR_TEAM_ID
-    channelId = $TEAMS_HR_CHANNEL_ID
-    contentType = "html"
-    content:
-      ⚠️ Documents Incomplete — {employee_full_name}<br>
-      <br>
-      Missing: {comma-separated list of missing documents, or "None"}<br>
-      Invalid: {comma-separated list of invalid documents, or "None"}<br>
-      Case: {PAPERCLIP_TASK_ID}<br>
-      <br>
-      Follow-up email sent to candidate. Awaiting resubmission.
-  If it fails → add "⚠️ Teams notification failed: {error}" to issue comment and continue.
-
-→ IMPORTANT: After Step 35, the routine STOPS and awaits the next candidate reply.
-  The heartbeat will detect the candidate's resubmission and re-trigger this routine
-  with source="api" + messageId in payload, which enters at PHASE 4 → PHASE 5 → PHASE 6
-  (if issues remain) → PHASE 7 (if all complete).
-  This loop repeats until all mandatory documents are present and valid.
-
-IF no discrepancies → proceed directly to PHASE 7.
-```
-
----
-
-## PHASE 7 — Multi-round submission handling
-
-**Reached when a resubmission is received after Phase 6, OR when Phase 5 finds no discrepancies.**
-
-```
-Step 36. For each new reply from candidate (entered via Phase 4):
-    - Compare against already accepted docs (do NOT ask again for accepted docs)
-    - If better copy received, keep latest valid version
-    - If duplicate filename, append timestamp suffix (do not silently overwrite):
-      e.g. Aadhaar_2026-04-23T09-15-00Z.pdf
-    - If all mandatory docs now present and valid → set status = complete_submission_received → run Step 36a, then proceed to Phase 8
-    - If still partial → set status = partial_submission_received
-      → Append to audit-log.csv (CSV append pattern):
-        {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|partial_submission_received|partial_submission_received|Still waiting on {N} documents|{list of still-missing items}
-      → Return to Phase 6 (discrepancy handling) to send updated resubmission request
-      → Heartbeat will detect next reply and re-enter at Phase 4
-
-Step 36a. Auto-upload all validated documents to Verified Documents (runs only when all mandatory docs are present and clean):
-  For each document in the validated + accepted set:
-
-    STEP 36a-i — Resolve (messageId, attachmentId):
-    - If processed in Phase 5 of THIS run → use messageId + attachmentId already in context.
-    - If accepted in a PREVIOUS run → read case-tracker.md Attachment Lookup table,
-      find MOST RECENT row where Filename = {filename}, extract messageId + attachmentId.
-
-    STEP 36a-ii — Transfer to Verified Documents:
-    sharepoint_transfer_from_outlook
-      messageId    = "{messageId}"
-      attachmentId = "{attachmentId}"
-      destPath     = "HR-Onboarding/{employee_full_name} - {date_of_joining}/02_Verified_Documents/{filename}"
-      mimeType     = "{detected MIME type}"
-    → On HTTP 429 or 503: wait 10 s, retry up to 3 times. On 3rd failure → escalate (notify human_in_loop_email, append escalated row to audit-log, continue to next file).
-
-    STEP 36a-iii — Post-upload integrity check:
-    sharepoint_get_file_info
-      filePath="HR-Onboarding/{employee_full_name} - {date_of_joining}/02_Verified_Documents/{filename}"
-    → If size = 0 or not found → delete empty file, escalate, continue.
-
-  After all files transferred:
-  → Append to audit-log.csv (CSV append pattern):
-    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|complete_submission_received|files_uploaded|Verified documents auto-uploaded to 02_Verified_Documents|{N} files
-  → Update case-tracker Document Tracker: status = "uploaded" for all verified docs
-  → Add row to Status History: | {now} | complete_submission_received | {N} verified docs uploaded to 02_Verified_Documents |
-  → Post issue comment: "All documents validated and uploaded to 02_Verified_Documents ({N} files). Proceeding to human verification."
-  → Phase 9 Step 46 will SKIP verified upload (already done here).
-```
-
----
-
-## PHASE 8 — Human verification
-
-```
-Step 37. Set status = awaiting_human_verification
-
-Step 38. Append to audit-log.csv (CSV append pattern):
-    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|awaiting_human_verification|human_notified|All docs received — human verification requested|—
-
-Step 39. outlook_send_email to human_in_loop_email
-    subject: "HR Action Required: Verify onboarding documents for {employee_full_name}"
-    isHtml: true
-    body includes:
-    - employee_full_name, employee_email, phone_number, role, employee_type, date_of_joining
-    - current_status
-    - summary_of_action_taken
-    - missing_documents (if any)
-    - discrepancy_summary (if any)
-    - candidate_response_summary
-    - reminder_1_sent: Yes/No
-    - reminder_2_sent: Yes/No
-    - human_action_required: Yes
-    - recommended_next_step: "Please verify documents and approve upload to SharePoint"
-
-Step 40. Create Paperclip approval on current issue:
-    → title: "Verify onboarding documents for {employee_full_name}"
-    → body: checklist progress + discrepancy summary
-    → required approver: human_in_loop_email user
-
-Step 41. Update case-tracker Status History:
-    → Add row: | {now} | awaiting_human_verification | All docs received. Pending human review and SharePoint upload approval. |
-
-Step 41a. Teams notification (non-blocking):
-  teams_send_channel_message
-    teamId    = $TEAMS_HR_TEAM_ID
-    channelId = $TEAMS_HR_CHANNEL_ID
-    contentType = "html"
-    content:
-      ✅ Documents Verified — {employee_full_name}<br>
-      <br>
-      Verified: {N}/{total} documents<br>
-      Case: {PAPERCLIP_TASK_ID}<br>
-      Next: Human review approval requested from {human_in_loop_email}<br>
-      <br>
-      All mandatory documents received and validated. Awaiting HR sign-off.
-  If it fails → add "⚠️ Teams notification failed: {error}" to issue comment and continue.
-
-Step 42. Wait for approval.
-```
-
----
-
-## PHASE 9 — SharePoint upload (on approval)
-
-**Critical rule:** Never transform, OCR-extract, or summarise attachment content before upload.
-Always download the original binary file from Outlook and store it verbatim in SharePoint.
-Never write an empty file — validate non-zero size before every write.
-
-```
-Step 43. On human approval received:
-
-Step 44. Set status = sharepoint_upload_in_progress
-
-Step 45. Append to audit-log.csv (CSV append pattern):
-    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|sharepoint_upload_in_progress|human_approved|Human approved — SharePoint upload started|—
-
-Step 46. Verified documents — SKIP (already uploaded in Phase 7 Step 36a):
-    Verified docs were transferred to 02_Verified_Documents immediately after validation passed (Step 36a).
-    Do NOT re-upload verified files here.
-    → If for any reason 02_Verified_Documents is empty (e.g. Step 36a failed mid-run), run the full 46a–46c sequence below as a fallback:
-
-    STEP 46a — Resolve (messageId, attachmentId) for this file:
-    - If processed in Phase 5 of THIS run → use messageId + attachmentId already in context.
-    - If accepted in a PREVIOUS run → read case-tracker.md Attachment Lookup table,
-      find the MOST RECENT row where Filename = {filename}, extract messageId + attachmentId.
-
-    STEP 46b — Transfer directly from Outlook to SharePoint (up to 3 attempts):
-    sharepoint_transfer_from_outlook
-    messageId="{messageId}"
-    attachmentId="{attachmentId}"
-    destPath="HR-Onboarding/{employee_full_name} - {date_of_joining}/02_Verified_Documents/{filename}"
-    mimeType="{expected MIME type — e.g. application/pdf, image/jpeg, image/png}"
-    → Returns: { name, size, transferredBytes, webUrl }
-    → On HTTP 429 or 503: wait 10 s, retry. After 3 failures → escalate (see Step 49), skip this file.
-    → Do NOT use outlook_read_attachment + sharepoint_upload_binary — binary would pass through context window and fail for large files.
-
-    STEP 46c — Post-upload integrity check:
-    sharepoint_get_file_info
-    filePath="HR-Onboarding/{employee_full_name} - {date_of_joining}/02_Verified_Documents/{filename}"
-    → Confirm returned size > 0.
-    → If size = 0 or file not found → delete the empty file, escalate via Step 49.
-
-Step 47. Raw submissions — SKIP (already uploaded in Phase 4 Step 25b):
-    Raw files were transferred to 01_Raw_Submissions immediately on receipt, before validation.
-    Do NOT re-upload raw files here. Proceed directly to Step 48.
-
-Step 48. If any discrepancy notes exist:
-    sharepoint_write_file
-    path="HR-Onboarding/{employee_full_name} - {date_of_joining}/03_Exception_Notes/discrepancy-log.md"
-
-Step 49. Escalation on any unrecoverable failure (download, validation, or upload):
-    → set status = escalated
-    → Append to audit-log.csv (CSV append pattern):
-      {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|escalated|escalated|Phase 9 failure after retries|Path: {path} Stage: {46a|46b|46c} Error: {error}
-    → outlook_send_email to human_in_loop_email:
-      subject: "HR Alert: SharePoint upload failure — {employee_full_name}"
-      body: folder path, filename, failure stage, error detail, files successfully uploaded so far
-    → Continue to next file (do NOT stop entire upload for one failed file unless ALL files fail)
-    → If ALL files fail → STOP, leave status = escalated
-
-Step 50. Set status = uploaded_to_sharepoint
-
-Step 51. Append to audit-log.csv (CSV append pattern):
-    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|uploaded_to_sharepoint|files_uploaded|All files uploaded to SharePoint|{N} files
-
-Step 52. outlook_send_email to human_in_loop_email:
-    subject: "Onboarding documents uploaded — {employee_full_name}"
-    isHtml: true
-    body:
-    <p>Hi,</p>
-    <p>Documents have been uploaded to SharePoint for <strong>{employee_full_name}</strong>.</p>
-    <p>Folder: HR-Onboarding/{employee_full_name} - {date_of_joining}</p>
-    <p>Files uploaded:</p><ul>{list of filenames}</ul>
-    <p>Regards,<br>HR Automation</p>
-
-Step 53. Update case-tracker:
-    → Update Document Tracker rows: status = "uploaded" for all uploaded docs
-    → Add row to Status History: | {now} | uploaded_to_sharepoint | {N} files uploaded to SharePoint |
-```
-
----
-
-## PHASE 10 — Send completion email and close case
-
-```
-Step 54. All of the following must be true before completing:
-    ✓ Required documents received
-    ✓ Discrepancies resolved or approved by human
-    ✓ Human verification complete
-    ✓ SharePoint upload successful
-    ✓ Notification sent to human_in_loop_email
-
-Step 54a. Send onboarding completion email to the candidate.
-    Recipients:
-        - employee_email (primary)
-        - Any additional email addresses on file for this candidate (e.g. personal email if provided)
-    Subject: "Onboarding Completed – Next Steps"
-    Body:
-        Dear {employee_full_name},
-
-        We are pleased to confirm that your onboarding process has been successfully completed.
-
-        Your joining date is {date_of_joining}. Further details regarding your next steps — including reporting instructions,
-        system access, and any pre-joining formalities — will be shared with you shortly via email.
-
-        If you have any questions or require any changes, please reply to this email and our HR team will assist you promptly.
-
-        Welcome aboard!
-
-        Warm regards,
-        HR Team
-        Medicodio AI
-
-    Log:
-        - Email sent status (success / failure)
-        - Timestamp of send
-        - Recipient list (all addresses emailed)
-    On failure: notify human_in_loop_email immediately, append failure row to audit-log.csv, do NOT close case.
-
-Step 54b. Send IT setup notification email.
-    Recipients:
-        - IT_SUPPORT_EMAIL (from env — itadmin@medicodio.ai)
-        - human_in_loop_email (HR reviewer, CC)
-        - recruiter_or_hr_email (CC)
-    Subject: "New Joiner IT Setup Required – {employee_full_name} ({role}) – Joining {date_of_joining}"
-    Body:
-        Hi IT Team,
-
-        Please be informed that a new team member is joining Medicodio AI and requires full IT setup to be ready before their
-        joining date.
-
-        New Joiner Details:
-        - Name:            {employee_full_name}
-        - Role:            {role}
-        - Date of Joining: {date_of_joining}
-        - Employee Type:   {employee_type}
-        - Phone Number:    {phone_number}
-        - Contact Email:   {employee_email}
-
-        Action Required — please ensure the following are ready by {date_of_joining}:
-        1. Laptop / workstation provisioned and configured
-        2. Company email account created ({employee_full_name}@medicodio.ai or as per naming convention)
-        3. Required software and tools installed for role: {role}
-        4. Access provisioned to relevant systems, repositories, and internal tools
-        5. VPN / remote access configured if applicable
-        6. Any role-specific hardware or peripherals arranged
-
-        Please keep everything ready before the joining date. If you need any additional information, reach out to
-        {recruiter_or_hr_name} at {recruiter_or_hr_email}.
-
-        Regards,
-        HR Team
-        Medicodio AI
-
-    Log:
-        - Email sent status (success / failure)
-        - Timestamp of send
-        - Recipients list
-    On failure: log warning, notify human_in_loop_email, continue case closure (non-blocking).
-
-Step 55. Set status = completed
-
-Step 56. Append to audit-log.csv (CSV append pattern):
-    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|completed|case_completed|Onboarding case closed — all docs verified and uploaded. Completion email sent to candidate. IT setup notification sent.|{recipient_list}
-
-Step 57. Post final issue comment: "Onboarding case completed for {employee_full_name}. SharePoint folder: HR-Onboarding/{employee_full_name} - {date_of_joining}. Completion email sent to: {recipient_list}. IT setup notification sent to: {IT_SUPPORT_EMAIL}"
-
-Step 57a. Teams notification (non-blocking):
-  teams_send_channel_message
-    teamId    = $TEAMS_HR_TEAM_ID
-    channelId = $TEAMS_HR_CHANNEL_ID
-    contentType = "html"
-    content:
-      ✅ Onboarding Complete — {employee_full_name}<br>
-      <br>
-      Role: {role} ({employee_type})<br>
-      Joining: {date_of_joining}<br>
-      SharePoint: HR-Onboarding/{employee_full_name} - {date_of_joining}/<br>
-      Case: {PAPERCLIP_TASK_ID}<br>
-      <br>
-      All documents verified and archived. Completion email sent to candidate. Case closed.
-  If it fails → add "⚠️ Teams notification failed: {error}" to issue comment and continue.
-
-Step 58. Final case-tracker update:
-    → Add row to Status History: | {now} | completed | Onboarding complete. All docs verified, uploaded. Completion email sent to candidate. IT setup notification sent to IT team and HR. |
-    → Update header to show: **CASE STATUS: COMPLETED**
-
-Step 59. Update Paperclip issue → done
-```
-
----
-
-## Failure handling
-
-| Scenario | Action |
-|---|---|
-| Initial email fails | Notify human immediately, append escalated row to audit-log, STOP |
-| Reminder fails | Notify human, keep case active |
-| Document review can't complete | Notify human, set status = awaiting_human_verification |
-| SharePoint upload fails after retries | Set status = escalated, notify human with full error summary |
-| HR manually stops | Set status = cancelled, stop all reminders |
-
-**Teams escalation notification (non-blocking) — send on any scenario above that sets status = escalated or STOP:**
-  teams_send_channel_message
-    teamId    = $TEAMS_HR_TEAM_ID
-    channelId = $TEAMS_HR_CHANNEL_ID
-    contentType = "html"
-    content:
-      🔴 Escalation Required — {employee_full_name}<br>
-      <br>
-      Reason: {escalation_reason}<br>
-      Action: Human review required<br>
-      Notified: {human_in_loop_email}<br>
-      Case: {PAPERCLIP_TASK_ID}<br>
-      <br>
-      Routine paused. Awaiting human resolution.
-  If it fails → add "⚠️ Teams notification failed: {error}" to issue comment and continue.
-
----
-
-## Notify human_in_loop_email immediately when
-
-- No reply after first reminder
-- No reply after second reminder
-- employee_type unclear
-- Submission from unexpected email
-- Any discrepancy found
-- Candidate asks a process question
-- Document unavailable / candidate requests extension
-- Name mismatch found
-- Rehire case (needs prior-record decision)
-- SharePoint folder already exists unexpectedly
-- Duplicate workflow detected
-
----
-
-## Audit Log Format
-
-File: `HR-Onboarding/audit-log.csv`  
-Format: **pipe-delimited CSV** (`|`). Never use comma as delimiter.
-
-**Header row (first line of file — written once at creation):**
-```
-timestamp|case_id|employee_email|employee_full_name|employee_type|human_in_loop_email|recruiter_or_hr_name|current_status|event|action_taken|brief_reason|paperclip_issue_id
-```
-
-**ALL 12 columns are mandatory on every row — no exceptions:**
-```
-{timestamp}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|{event}|{action_taken}|{brief_reason}|{paperclip_issue_id}
-```
-
-- `paperclip_issue_id`: Paperclip UUID of the issue that triggered this run (`PAPERCLIP_TASK_ID`). Use `—` for rows written by heartbeat when no issue ID is available. **Legacy rows (11 columns, no `paperclip_issue_id` column):** treat as valid — read and preserve them as-is, append new rows with all 12 columns. Never rewrite or pad old rows.
-
-**Append pattern:** `sharepoint_read_file` → add new line at end → `sharepoint_write_file` with full content.
-
-- `timestamp`: ISO-8601 UTC — e.g. `2026-04-23T09:15:00Z`
-- `current_status`: must match the Status Transition Rules table above for the given event
-- Use `—` (em-dash) for fields that genuinely do not apply — never leave blank
-
-Events: `case_created`, `initial_email_sent`, `awaiting_reply`, `candidate_acknowledged`, `reminder_1_sent`, `reminder_2_sent`, `reply_from_alternate_sender`, `partial_submission_received`, `complete_submission_received`, `under_automated_review`, `discrepancy_found`, `resubmission_requested`, `human_notified`, `human_approved`, `sharepoint_folder_created`, `files_uploaded`, `case_completed`, `case_stalled`, `case_cancelled`, `case_withdrawn`, `escalated`, `heartbeat_tick`
-
-**The `case_created` row MUST include all fields** — the heartbeat reads `human_in_loop_email`, `recruiter_or_hr_name`, `employee_type`, and `current_status` from this row to know who to notify and how to handle active cases.
+This parent issue is the long-lived case anchor. Every downstream phase reads `parent_issue_id` from its child issue description and reports back here. Final transition to `done` happens only at Phase 10 (`close-case.md` Step terminal). All other status changes (`in_review` ↔ `in_progress` ↔ `blocked`) are driven by the case-status mapping in `_shared.md § §21`.

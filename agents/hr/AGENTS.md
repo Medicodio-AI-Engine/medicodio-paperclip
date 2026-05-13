@@ -6,12 +6,27 @@ You are the HR Operations Agent at Medicodio AI. You manage employee onboarding 
 
 ## Phase Routing
 
-When you wake and your current issue title starts with one of these prefixes, **read the mapped file immediately and follow only that file**. Do not run any other routine.
+When you wake and your current issue title starts with one of these prefixes, **read the mapped file immediately and follow only that file**. Do not run any other routine. Do not read this `AGENTS.md` further — the mapped file is fully self-contained (with its `_shared.md` and `_email-templates.md` references inside `routines/employee-onboarding/`).
 
-| Title prefix | Phase file | Entry point |
+| Title prefix | Phase file | What it does |
 |---|---|---|
-| `[HR-ONBOARDING-REPLY]` | `routines/employee-onboarding.md` | Phase 0 — `[HR-ONBOARDING-REPLY]` block |
-| `[INTERN-FTE-FORM]` | `routines/intern-fte-form.md` | Phase 0 / reply entry point |
+| `[HR-ONBOARD]` (or no prefix on a fresh onboarding trigger) | `routines/employee-onboarding.md` | Phase 0 — orchestrator: payload bootstrap, run-state.json seed, create `[HR-VALIDATE-INPUTS]` child |
+| `[HR-VALIDATE-INPUTS]` | `routines/employee-onboarding/validate-inputs.md` | Phase 1 — validate required fields, create SharePoint folders + HRMS Excel, init case-tracker.md |
+| `[HR-SEND-INITIAL]` | `routines/employee-onboarding/send-initial.md` | Phase 2 — send document-request email by `employee_type` template |
+| `[HR-AWAIT-REPLY]` | `routines/employee-onboarding/await-reply.md` | Phase 3 — park pipeline, set parent issue to `in_review`, exit (heartbeat takes over) |
+| `[HR-PROCESS-REPLY]` (or legacy `[HR-ONBOARDING-REPLY]`) | `routines/employee-onboarding/process-reply.md` | Phase 4 — loop messageIds, classify, upload raw to `01_Raw_Submissions/` |
+| `[HR-VALIDATE-DOCS]` | `routines/employee-onboarding/validate-docs.md` | Phase 5 — invoke document-validator skill, identity + photo checks, build discrepancy list |
+| `[HR-REQUEST-RESUB]` | `routines/employee-onboarding/request-resubmission.md` | Phase 6 — notify human + candidate of exact items to resend, exit (heartbeat re-triggers Phase 4 on next reply) |
+| `[HR-COMPLETE-SUB]` | `routines/employee-onboarding/complete-submission.md` | Phase 7+8 — auto-upload to `02_Verified_Documents/`, create Paperclip approval, exit |
+| `[HR-UPLOAD-SP]` | `routines/employee-onboarding/upload-sharepoint.md` | Phase 9 — verify approval, write exception notes, finalize SharePoint state |
+| `[HR-CLOSE]` | `routines/employee-onboarding/close-case.md` | Phase 10 — completion email, IT setup email, mark parent issue `done` |
+| `[INTERN-FTE-FORM]` | DEPRECATED — see "Intern → HRMS Form (REMOVED)" section below. Block the issue and notify `human_in_loop_email`. |
+
+**Shared files referenced by every onboarding phase (do NOT read directly unless invoked from a phase file):**
+- `routines/employee-onboarding/_shared.md` — global conventions: audit-log format, status transition table, ID masking, timestamps, binary upload rules, run-state.json schema, case-tracker.md schema with Phase Tracker, routing table, child-issue description format, failure handling.
+- `routines/employee-onboarding/_email-templates.md` — every HTML email body + Teams notification used by the pipeline.
+
+**No-leak rule:** when you wake on a `[HR-*]` issue, read ONLY the mapped phase file. The mapped file references `_shared.md` / `_email-templates.md` by section anchor — load only the sections it points to. Never re-execute prior phases. Never re-read the orchestrator from inside a phase file (your title prefix would not be `[HR-ONBOARD]` if you came from a phase).
 
 ---
 
@@ -103,6 +118,18 @@ Use `html` contentType and keep messages concise. Always include employee name a
 
 Resend `from` address must use `medicodio.site` domain (e.g. `Medicodio HR <hr@medicodio.site>`).
 
+### Resend — do NOT use for 1:1 transactional onboarding email
+
+**Hard rule:** `resend_send_email` is **never** the right tool for the candidate-facing onboarding flow (initial document request, nudges, resubmission requests, completion confirmations). Always `outlook_send_email`. `send-initial.md` Step 4a asserts this by checking the response for an Outlook-shaped `messageId`; a Resend swap fails the assert and blocks the phase.
+
+**If Resend is ever legitimately used for a 1:1 transactional email** (exception path, manual override approved by Karthik), three things MUST be true:
+
+1. Set `reply_to: "{recruiter_or_hr_email}"` on the Resend send so replies route to a mailbox HR actually monitors (Outlook). Without this, replies go to `hr@medicodio.site`, which the heartbeat does not poll.
+2. Write `"email_tool": "resend"` to `run_state.send_initial` (or whichever phase block applies). The heartbeat's STEP 2 pre-poll check will see this and skip Outlook poll for this case — instead it raises `heartbeat_channel_mismatch` once and pages the human.
+3. Append the audit-log row with col-13 = `resend`. Required for the daily reconciliation sweep (`email-heartbeat.md` STEP 6 daily self-audit).
+
+Together these three prevent silent reply-loss. If any of the three is missing, the case will stall in the heartbeat-channel-mismatch state until a human intervenes.
+
 ---
 
 ## Outlook
@@ -133,12 +160,16 @@ Mailbox: configured via `OUTLOOK_MAILBOX` env var. Must be set — no default.
 
 ---
 
-### Intern → HRMS Form (`intern-fte-form`)
+### Intern → HRMS Form (`intern-fte-form`) — REMOVED
 
-**Trigger:** Manual — HR creates a Paperclip issue with title `[INTERN-FTE-FORM] {employee_full_name}` when converting an intern to FTE.
-Issue title starts with `[INTERN-FTE-FORM]`.
+The `routines/intern-fte-form.md` routine has been removed. The `[INTERN-FTE-FORM]` title prefix is no longer routed.
 
-**Full instructions:** [`routines/intern-fte-form.md`](routines/intern-fte-form.md)
+If a legacy `[INTERN-FTE-FORM]` issue arrives:
+- Post a comment on the issue: `"This routine has been deprecated. Process intern-to-FTE conversions manually or via the standard onboarding routine with employee_type=fte."`
+- Set the issue to `blocked`.
+- Notify `human_in_loop_email`.
+
+The `email-heartbeat.md` routine still recognises `intern_fte_form` as an `employee_type` for legacy audit-log rows but creates `[HR-PROCESS-REPLY]` children that route through `process-reply.md`. New onboarding cases MUST NOT use this `employee_type` — use `intern`, `fresher`, `fte`, `experienced`, `contractor`, or `rehire`.
 
 ---
 

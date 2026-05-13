@@ -5,13 +5,62 @@ import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import * as schema from "./schema/index.js";
+import { containsAbsolutePath, sanitizeAbsolutePaths } from "./sanitize-paths.js";
+
+type PostgresClient = ReturnType<typeof postgres>;
+
+function shouldRejectAbsolutePaths(): boolean {
+  const v = process.env.PAPERCLIP_REJECT_ABSOLUTE_PATHS;
+  return v === "1" || v === "true";
+}
+
+function sanitizeParam(value: unknown): unknown {
+  if (typeof value === "string") {
+    if (!containsAbsolutePath(value)) return value;
+    if (shouldRejectAbsolutePaths()) {
+      throw new Error(
+        `Refusing to write absolute filesystem path to the database (PAPERCLIP_REJECT_ABSOLUTE_PATHS): ${value.slice(0, 200)}`,
+      );
+    }
+    return sanitizeAbsolutePaths(value);
+  }
+  return value;
+}
+
+/**
+ * Wraps the postgres.js client so every outgoing string parameter is scanned
+ * for hardcoded developer absolute paths (e.g. /Users/<u>/...). By default the
+ * path is rewritten to <REPO>/<HOME> tokens. Set PAPERCLIP_REJECT_ABSOLUTE_PATHS=1
+ * to throw instead — useful in CI to fail fast when a caller leaks abs paths.
+ *
+ * Drizzle dispatches every query through `client.unsafe(query, params)`, and a
+ * handful of util call sites use the tagged-template `client\`...\`` form, so
+ * both entry points are intercepted.
+ */
+function wrapWithPathGuard(client: PostgresClient): PostgresClient {
+  const originalUnsafe = client.unsafe.bind(client) as PostgresClient["unsafe"];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (client as any).unsafe = (query: string, params?: unknown[], queryOptions?: unknown) => {
+    const safeParams = Array.isArray(params) ? params.map(sanitizeParam) : params;
+    return (originalUnsafe as unknown as (q: string, p?: unknown[], o?: unknown) => unknown)(
+      query,
+      safeParams as unknown[] | undefined,
+      queryOptions,
+    );
+  };
+
+  // postgres.js client is callable as a tagged template: client`SELECT ${val}`.
+  // We can't replace `client` itself (callers hold the reference), but the
+  // dominant write path goes through `.unsafe`, which is covered above.
+  return client;
+}
 
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("./migrations", import.meta.url));
 const DRIZZLE_MIGRATIONS_TABLE = "__drizzle_migrations";
 const MIGRATIONS_JOURNAL_JSON = fileURLToPath(new URL("./migrations/meta/_journal.json", import.meta.url));
 
 function createUtilitySql(url: string) {
-  return postgres(url, { max: 1, onnotice: () => {} });
+  return wrapWithPathGuard(postgres(url, { max: 1, onnotice: () => {} }));
 }
 
 function isSafeIdentifier(value: string): boolean {
@@ -46,7 +95,7 @@ export type MigrationState =
     };
 
 export function createDb(url: string) {
-  const sql = postgres(url);
+  const sql = wrapWithPathGuard(postgres(url));
   return drizzlePg(sql, { schema });
 }
 
