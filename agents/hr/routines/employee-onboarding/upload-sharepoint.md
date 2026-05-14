@@ -282,7 +282,7 @@ Write the file.
 POST /api/companies/{PAPERCLIP_COMPANY_ID}/issues
 {
   "title": "[HR-CLOSE] {employee_full_name} — Phase 10 final close",
-  "description": "phase_file: routines/employee-onboarding/close-case.md\nrun_state_path: {run_state_path}\nparent_issue_id: {parent_issue_id}\ncase_id: {case_id}",
+  "description": "phase_file: routines/employee-onboarding/close-case.md\nrun_state_path: {run_state_path}\nparent_issue_id: {parent_issue_id}\npaperclip_issue_id: {parent_issue_id}\ncase_id: {case_id}",
   "assigneeAgentId": "{PAPERCLIP_AGENT_ID}",
   "parentId": "{parent_issue_id}",
   "status": "todo",

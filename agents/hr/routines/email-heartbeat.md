@@ -2,7 +2,7 @@
 
 **Trigger:** Cron — every 30 minutes  
 **Concurrency policy:** `skip_if_running` — never overlap heartbeat runs  
-**Catch-up policy:** `skip_missed`
+**Catch-up policy:** `bounded` — on missed ticks, run ONE catch-up tick covering up to the last 6 hours of lookback (TASK-016). Idempotency from `run_state.process_reply.processed_message_ids` (TASK-007) and per-tick dedup on audit-log rows guarantees no duplicate side-effects on replay.
 
 ---
 
@@ -41,13 +41,60 @@ This heartbeat does NOT validate documents, run the document-validator skill, up
 
 ---
 
+## NON-NEGOTIABLE — every case visited every tick
+
+This routine processes every case in `email_poll_bucket` AND `approval_poll_bucket` on every tick. Narrowing scope to the candidate most recently handled, focusing on the "active" case, or skipping cases that "look stable" is a bug. The enumeration gate in STEP 6 WILL fail the tick if any case in the bucket has no audit row by completion. If the thought appears — "I'll just process the one that's active" or "the other cases look fine, I'll skip them" — STOP. Process every case in the bucket.
+
+Acceptable per-case outcomes (each must produce ≥1 audit row this tick):
+
+- `reply_detected` — reply found and routed.
+- `reminder_1_sent` / `reminder_2_sent` — nudge fired.
+- `heartbeat_tick` (no-op within 24h window — see STEP 3 step 7).
+- `heartbeat_skip` (with reason — timestamp error, paperclip_issue_id missing, run-state unreachable, etc.).
+- `approval_polled` — approval-poll bucket case checked.
+- `escalated` / `audit_reconciliation_failed` / `case_stalled` / `case_missing_from_audit_log` — terminal events for this tick.
+
+Silent skip (no row for a case in the bucket) is a bug — STEP 6 enumeration gate detects it and fails the tick.
+
+---
+
+## Search Protocol — memory-independent, no hardcoded patterns
+
+Heartbeat search MUST NOT rely on candidate emails, candidate names, ticket IDs, subject keywords, or any other identifier cached in agent memory or hardcoded in this routine. Memory is a hint, never a source. Every tick rebuilds the active-case set from authoritative state.
+
+**Active-case discovery (per tick):**
+
+1. `HR-Onboarding/audit-log.csv` bucket build (STEP 1) — current source of truth for case state.
+2. Cross-check via Paperclip API: `GET /api/companies/{PAPERCLIP_COMPANY_ID}/issues?assigneeAgentId={HR_AGENT_ID}&title-prefix=[HR-ONBOARD]&status=todo,in_progress,in_review` (STEP 1d bridge — flags cases missing from audit-log).
+
+**Per-case Outlook search (STEP 2):**
+
+- Search is per-case, looping every entry in `email_poll_bucket_clean`. The search input for each case is read from that case's own run-state and audit-log — NEVER from agent memory.
+- Inputs allowed per case: `employee_email`, `alternate_candidate_email`, `last_outbound_email_timestamp` (audit-log), `last_reply_routed_timestamp` (audit-log), `run_state.send_initial.outlook_message_id`, `run_state.send_initial.conversation_id` (once TASK-005 ships).
+- The list of monitored mailboxes / queries comes from `HR-Onboarding/config.md` or the case's own `run_state.send_initial.inbox_used`. Never invent inbox addresses or query strings.
+
+**Forbidden:**
+
+- Searching only for the "active" or "most-recent" candidate, regardless of who that is.
+- Searching only for candidates the agent recalls handling in earlier sessions.
+- Hardcoding subject strings, sender names, mailbox addresses, or ticket IDs inside this routine.
+- Stopping the per-case loop early because the first N cases had no replies.
+- Using subject keywords as the primary search input — sender (per case) and conversation thread keys are authoritative; subject is a fallback only.
+
+Any agent that violates these rules will miss replies for every case it skipped, and STEP 6 will fail the tick. The deviation is detected, not tolerated.
+
+---
+
 ## STEP 1 — Load active cases
+
+**Tick anchor (TASK-001):** capture `heartbeat_start_timestamp = {now}` as the FIRST action of this tick, before any other tool call. This timestamp is the boundary STEP 6 enumeration gate uses to verify every bucket case received at least one audit row this tick. Keep it in scope until STEP 6 completes.
 
 1. `sharepoint_read_file path="HR-Onboarding/audit-log.csv"`
    → Parse all rows (pipe-delimited CSV, skip header row)
    → Build TWO buckets from the audit-log:
-     - **email-poll bucket** — cases where `current_status` NOT IN: `completed`, `cancelled`, `withdrawn`, `stalled`, `escalated`, `awaiting_human_verification`, `verified_by_human`, `sharepoint_upload_in_progress`, `uploaded_to_sharepoint`, `blocked`, `hrms_form_submitted`. These cases get reply-check (STEP 2) and nudge-decision (STEP 3) processing.
-     - **approval-poll bucket** — cases where `current_status == awaiting_human_verification`. These cases get approval-poll (STEP 6) processing only. They do NOT receive reply-checks or nudges (the candidate already sent everything; we are waiting on the human reviewer).
+     - **email-poll bucket** — cases where `current_status` NOT IN: `completed`, `cancelled`, `withdrawn`, `stalled`, `escalated`, `verified_by_human`, `sharepoint_upload_in_progress`, `uploaded_to_sharepoint`, `blocked`, `hrms_form_submitted`. These cases get reply-check (STEP 2) and nudge-decision (STEP 3) processing.
+       - **NOTE (TASK-018):** `awaiting_human_verification` is NO LONGER in this exclusion list. Cases waiting on the human approver still receive reply-poll because candidates sometimes send corrections (updated bank details, corrected docs, scope changes) after the approval request goes out. The reply-poll is conversationId-keyed (STEP 2 3a), so it cannot accidentally route unrelated traffic. Nudges are suppressed for `awaiting_human_verification` cases via the explicit guard in STEP 3 — the nudge owner there is the human approver, not the candidate.
+     - **approval-poll bucket** — cases where `current_status == awaiting_human_verification`. These cases get approval-poll (STEP 5) processing ALSO. Cases in this bucket additionally appear in the email-poll bucket per TASK-018 — both buckets process them.
    → For each active case, group rows by `case_id` and extract:
      - `employee_email`          (from any row for this `case_id`)
      - `employee_full_name`      (from any row for this `case_id`)
@@ -96,31 +143,49 @@ This heartbeat does NOT validate documents, run the document-validator skill, up
         ```
       - Exclude from further processing this tick
 
-1d. **Audit-log ↔ Paperclip bridge check — catches cases missing from audit-log.**
+1d. **Paperclip-issue primary index (TASK-019) — active recovery of cases missing from audit-log.**
 
-The bucket above is derived from `audit-log.csv` alone. If a Phase 1 run wrote `case-tracker.md` and `run-state.json` but FAILED or SKIPPED the audit-log append (e.g. an agent partial-completed Phase 1 — folders / run-state / tracker landed but the audit-log row was malformed or skipped), the case will be invisible to the heartbeat. Bridge it here:
+Audit-log is one of two indices. The OTHER index is Paperclip itself: every active onboarding case has an `[HR-ONBOARD]` parent issue. If Phase 1 partial-completed (folders / run-state / case-tracker landed but the audit-log row failed), the audit-log bucket above is incomplete. Recover here.
 
 ```
 GET /api/companies/{PAPERCLIP_COMPANY_ID}/issues?assigneeAgentId={HR_AGENT_ID}&status=todo,in_progress,in_review&title-prefix=[HR-ONBOARD]
 → For each returned issue:
-   - Parse description for `case_id:` line. If absent, also look for `employee_email:` line and reconstruct `{employee_email}-{date_of_joining}`.
+   - Parse description for `case_id:` line. If absent, look for `employee_email:` + `date_of_joining:` lines and reconstruct `{employee_email}-{date_of_joining}` (rehire suffix `-rehire-N` if `rehire_n:` line present).
    - Compare against the union of (email-poll bucket ∪ approval-poll bucket ∪ cases already flagged for skip in 1c).
 ```
 
 For each Paperclip-active `[HR-ONBOARD]` issue whose `case_id` is **NOT present in any heartbeat bucket**:
 
-1. **Notify `human_in_loop_email`** (subject `HR Alert: Onboarding case missing from audit-log — {employee_full_name}`, body names the Paperclip issue id and the expected `case_id`, asks the human to inspect SharePoint folder and re-trigger Phase 1 if data is missing).
+1. Attempt run-state recovery via the TASK-010 layered path resolution (see STEP 5a). If `run_state.json` can be read, this case is recoverable — `current_phase` from the file decides which bucket it joins:
+   - `current_phase` ∈ {`await_reply`, `process_reply`, `validate_docs`, `request_resubmission`, `complete_submission`, `validate_inputs`, `send_initial`} → ADD to `email_poll_bucket` for this tick. The current_status used for bucket logic is derived from `run_state.current_phase` via the table below.
+   - `current_phase` ∈ {`awaiting_approval`} → ADD to `approval_poll_bucket` for this tick.
+   - `current_phase` ∈ {`closed`, `closed_withdrawn`, `closed_cancelled`, `upload_sharepoint`, `close_case`} → terminal / handled elsewhere. Do not add to either bucket. Skip silently.
 
-2. **Append audit-log row** (13 cols, col-13 = `outlook` for the notify email):
+   **Current-status derivation (when audit-log row missing):**
+   | `run_state.current_phase` | derived `current_status` |
+   |---|---|
+   | `validate_inputs` | `initiated` |
+   | `send_initial` | `initial_email_sent` |
+   | `await_reply` | `awaiting_document_submission` |
+   | `process_reply` | `partial_submission_received` |
+   | `validate_docs` | `under_automated_review` |
+   | `request_resubmission` | `awaiting_resubmission` |
+   | `complete_submission` | `complete_submission_received` |
+   | `awaiting_approval` | `awaiting_human_verification` |
+
+2. After adding the recovered case to a bucket, write a one-time recovery audit-log row (13 cols, col-13 = `—`):
    ```
-   {now}|{reconstructed_case_id}|{employee_email or —}|{employee_full_name or —}|—|—|—|escalated|case_missing_from_audit_log|Paperclip [HR-ONBOARD] issue {paperclip_issue_id} active but case_id not in audit-log|Phase 1 audit write likely failed or skipped — human must re-trigger|{paperclip_issue_id}|outlook
+   {now}|{reconstructed_case_id}|{employee_email or —}|{employee_full_name or —}|{employee_type or —}|{human_in_loop_email or —}|{recruiter_or_hr_name or —}|{derived current_status}|case_recovered_from_paperclip_index|Recovered case from Paperclip [HR-ONBOARD] index — audit-log row missing prior to recovery|paperclip_issue_id={paperclip_issue_id}; current_phase={run_state.current_phase}|{paperclip_issue_id}|—
    ```
+   The next tick will find this row and the case will appear naturally in the audit-log-derived bucket.
 
-3. **Dedup**: if a `case_missing_from_audit_log` row already exists for this `paperclip_issue_id` within the last 24h, do NOT re-notify. One alert per case per day.
+3. If run-state recovery also fails (path resolution returned `phase_blocked`): notify `{primary_human_in_loop_email}` from config (subject `HR Alert: Onboarding case unrecoverable — Paperclip issue {paperclip_issue_id}`, body names the Paperclip issue id and the resolution attempts). Append audit-log row:
+   ```
+   {now}|{reconstructed_case_id}|—|—|—|—|—|blocked|phase_blocked|Paperclip [HR-ONBOARD] issue {paperclip_issue_id} active but run-state cannot be resolved|All path resolution layers failed (TASK-010) — manual inspection required|{paperclip_issue_id}|—
+   ```
+   Dedup: skip the notification if a row with the same event + paperclip_issue_id was written in the last 24h.
 
-4. **Do NOT** auto-add this case to a bucket and start polling. The audit-log is the source of truth for case state; if it's missing, the case may be in any phase. Human inspection required.
-
-This bridge catches any case where Phase 1 partially completes but the audit-log row never lands.
+4. Bridge runs BEFORE the manifest in step 1.1 below — recovered cases must be in the manifest so the STEP 6 enumeration gate verifies their processing.
 
 2. If no active cases (after bridge check) → append to audit-log:
    ```
@@ -128,14 +193,30 @@ This bridge catches any case where Phase 1 partially completes but the audit-log
    ```
    → STOP
 
+**Tick manifest (TASK-001) — write IMMEDIATELY after buckets are built and BEFORE any per-case processing.**
+
+Compute:
+```
+E = len(email_poll_bucket)
+A = len(approval_poll_bucket)
+manifest_case_ids = sorted unique union of (email_poll_bucket[*].case_id ∪ approval_poll_bucket[*].case_id)
+```
+
+Append to audit-log:
+```
+{heartbeat_start_timestamp}|—|—|—|—|—|—|—|heartbeat_start|Tick started — email-poll: {E} cases, approval-poll: {A} cases|case_ids: {manifest_case_ids comma-joined}|—|—
+```
+
+Retain `manifest_case_ids` in scope for STEP 6 enumeration gate. If the manifest write itself fails after retry: notify human (subject `HR Alert: Heartbeat manifest write failed`), STOP this tick. No partial processing without a manifest anchor.
+
 ---
 
 ## STEP 1.5 — Cross-case duplicate detection (CRITICAL — runs BEFORE STEP 2)
 
 A single human candidate may have ended up with two `case_id`s in the audit-log due to:
-- Re-trigger after typo correction (old `gmai.com` case still active + new `gmail.com` case).
-- Re-trigger with slightly different `employee_full_name` (e.g. `Sameer Mansur` vs `Sameer S Mansur`) — orchestrator's older folder-name check missed this.
-- Manual recovery sub-issues (`Recover stalled issue MED-XXX`) creating parallel case identities.
+- Re-trigger after typo correction (old typo-domain case still active + new corrected-domain case).
+- Re-trigger with slightly different `employee_full_name` (e.g. middle-name added or omitted) — orchestrator's older folder-name check missed this.
+- Manual recovery sub-issues creating parallel case identities.
 
 If two active cases refer to the same human, the heartbeat would otherwise route the candidate's email replies to BOTH parents, creating duplicate `[HR-PROCESS-REPLY]` sub-issues and confusing downstream phases. This step detects + blocks that scenario.
 
@@ -214,6 +295,38 @@ If `email_poll_bucket_clean` is empty AND `approval_poll_bucket` is also empty (
 
 ## STEP 2 — Check for replies (email-poll bucket only)
 
+**Per-case invariant (TASK-003):** every case in `email_poll_bucket_clean` MUST emit ≥1 audit row before this step is considered complete for that case. Acceptable rows are listed in the `## NON-NEGOTIABLE` block at the top of this routine. A case that produces zero rows is a silent skip — STEP 6 enumeration gate detects it and fails the tick. Iterate every case. Do not stop early. Do not narrow to "active" cases.
+
+**Transient-failure budget (TASK-017) — applies to STEP 2 and STEP 5.**
+
+Per-case state in `run_state.heartbeat`:
+- `transient_failures: int` — consecutive failed ticks for this case.
+- `last_transient_failure_at`, `last_transient_failure_reason`.
+
+Failure modes that count as "transient" (recoverable next tick):
+- `outlook_search_emails` returns non-2xx after one in-tick retry.
+- `outlook_list_messages_in_conversation` (or equivalent) returns non-2xx after one retry.
+- `GET /api/approvals/{id}` returns non-2xx after one retry (STEP 5b).
+- `sharepoint_read_file` on `run_state.json` returns non-2xx after one retry (STEP 5a).
+
+On a transient failure for case X this tick:
+1. Read this case's run-state if not already loaded.
+2. `run_state.heartbeat.transient_failures += 1`.
+3. `run_state.heartbeat.last_transient_failure_at = {now}`.
+4. `run_state.heartbeat.last_transient_failure_reason = "{label}"`.
+5. `sharepoint_write_file` run-state.
+6. Append audit-log row:
+   ```
+   {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|heartbeat_skip|Transient {reason} — failure {N}/3|{error message}|{paperclip_issue_id or —}
+   ```
+7. **If `transient_failures >= 3`**: escalate. `outlook_send_email` to `{human_in_loop_email}` (subject `HR Alert: Heartbeat repeated transient failures — {employee_full_name}`, body names case_id, the failure reason, and the timestamps of the prior 3 attempts). Append audit-log row event=`escalated`. The case stays in its current bucket — next tick still tries. Human visibility is the goal, not auto-pausing.
+
+On a successful operation for case X this tick (reply poll succeeds, approval poll succeeds, run-state read succeeds):
+- `run_state.heartbeat.transient_failures = 0` (reset).
+- Persist run-state write only if the field changed (avoid write thrash).
+
+A `heartbeat_skip` row from this path satisfies the STEP 6 enumeration-gate invariant for the case.
+
 For each case in `email_poll_bucket_clean` built in STEP 1.5 (cases in `awaiting_human_verification` are NOT in this bucket — they get handled in STEP 5 below; cases flagged as duplicates by STEP 1.5 are also excluded):
 
 ### STEP 2 — Pre-poll channel cross-check
@@ -253,59 +366,123 @@ If neither mismatch trigger fires, proceed to 3a below. Otherwise:
 
 If all asserts pass → proceed with 3a below.
 
-3a. `outlook_search_emails`  
-    query: `"from:{employee_email}"`  
-    → Compute search cutoff: `max(last_outbound_email_timestamp, last_reply_routed_timestamp)` — use whichever is later; if `last_reply_routed_timestamp` is null, use `last_outbound_email_timestamp` alone  
-    → Collect **ALL** messages received AFTER that cutoff, sorted chronologically (oldest first)
+**Reply detection inputs (per-case, NO hardcoding):**
 
-3b. IF no results from 3a:
-    → subject query depends on employee_type:
-      - IF `employee_type` == `intern_fte_form`: query: `"subject:Review Your Onboarding Form {employee_full_name}"`
-      - ELSE: query: `"subject:Onboarding Documents {employee_full_name}"`
-    → `outlook_search_emails` with that query
-      → Collect all messages received AFTER `last_outbound_email_timestamp`
+- `conversation_id = run_state.send_initial.conversation_id` (TASK-005, may be null on legacy cases)
+- `processed_message_ids = run_state.process_reply.processed_message_ids` (TASK-007, defaults to `[]` if absent)
+- `inbox = run_state.send_initial.inbox_used` (TASK-009, default mailbox from `HR-Onboarding/config.md` if absent)
+- `subject_sent = run_state.send_initial.subject` (rendered per-case at Phase 2 send time; never hardcoded in this routine)
+- `cutoff = max(last_outbound_email_timestamp, last_reply_routed_timestamp)` (whichever is later; fall back to `last_outbound_email_timestamp` alone if `last_reply_routed_timestamp` is null)
 
-    **STRICT sender verification (NO exceptions):**
+### 3a — Primary: conversationId-keyed thread lookup (TASK-006)
 
-    For each message found by the subject-search:
+**Run this first when `conversation_id` is non-null.** Outlook conversationId is the authoritative thread key — replaces subject/sender heuristic and eliminates cross-candidate collisions.
+
+```
+outlook_search_emails
+  mailbox          = "{inbox}"
+  conversationId   = "{conversation_id}"
+  receivedAfter    = "{cutoff}"
+  excludeFromSelf  = true        ← do NOT return messages our own send produced
+→ Returns ALL messages in this thread received after cutoff (sorted chronologically, oldest first).
+```
+
+If the MCP `outlook_search_emails` does not accept `conversationId` directly, use the equivalent thread-list call (`outlook_list_messages_in_conversation` or vendor equivalent) — read tool catalogue, do not invent a method name.
+
+**Diff against `processed_message_ids`:**
+
+```
+new_messages = [m for m in results if m.id NOT IN processed_message_ids]
+```
+
+`new_messages` is the unprocessed reply set for this case. If empty → no new replies; proceed to STEP 3 (nudge check).
+
+`processed_message_ids` is the idempotency guarantee — even if the same thread is scanned twice (tick retry, catch-up), already-routed messages will not produce a duplicate sub-issue.
+
+### 3b — Legacy fallback: only when `conversation_id` is null
+
+A case sent before TASK-005 shipped has no `conversation_id` in run-state. For those cases ONLY:
+
+```
+outlook_search_emails
+  mailbox       = "{inbox}"
+  query         = "from:{employee_email}"
+  receivedAfter = "{cutoff}"
+→ Collect ALL messages received AFTER cutoff, sorted chronologically (oldest first).
+```
+
+If 3b returns empty AND `subject_sent` is non-null in run-state, try ONE more pass keyed on the per-case subject stored at send time:
+
+```
+outlook_search_emails
+  mailbox       = "{inbox}"
+  query         = "subject:\"{subject_sent}\""        ← read from run_state; NEVER hardcode subject text in this routine
+  receivedAfter = "{cutoff}"
+```
+
+Run the STRICT sender verification below against any subject-search hit.
+
+Once TASK-005 has shipped and back-fill has run, this fallback should fire on zero cases.
+
+### 3c — STRICT sender verification (applies to 3a AND 3b results)
+
+For every message returned by 3a (conversationId thread) or 3b (legacy from:/subject: search), enforce sender match before treating it as a reply:
+
+```
+sender_email_norm = trim(lowercase(message.from.email))
+case_email_norm   = trim(lowercase(case.employee_email))
+alt_email_norm    = trim(lowercase(case.alternate_candidate_email))   ← may be null
+
+is_match = (sender_email_norm == case_email_norm)
+        OR (alt_email_norm is not null AND sender_email_norm == alt_email_norm)
+```
+
+- **`is_match == true`** → keep the message in `new_messages`.
+- **`is_match == false`** → take the `reply_from_alternate_sender` path:
+  - `outlook_send_email` to `{human_in_loop_email}`:
+    - subject: `HR Alert: Possible reply from alternate address — {employee_full_name}`
+    - isHtml: true
+    - body: `<p>Hi,</p><p>A possible reply was detected for <strong>{employee_full_name}</strong> from an unrecognized email address:</p><table><tr><td><strong>Expected:</strong></td><td>{employee_email}</td></tr><tr><td><strong>Alternate on file:</strong></td><td>{alternate_candidate_email or "—"}</td></tr><tr><td><strong>Actual sender:</strong></td><td>{message.from.email}</td></tr></table><p>Please review and confirm if this is from the candidate. Case ID: {case_id}</p><p>Regards,<br>HR Automation</p>`
+  - Append to audit-log:
     ```
-    sender_email_norm = trim(lowercase(message.from.email))
-    case_email_norm   = trim(lowercase(case.employee_email))
-    alt_email_norm    = trim(lowercase(case.alternate_candidate_email))   ← may be null
-
-    is_match = (sender_email_norm == case_email_norm)
-            OR (alt_email_norm is not null AND sender_email_norm == alt_email_norm)
+    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|reply_from_alternate_sender|Notified human — reply on case thread from unrecognized sender|sender={message.from.email} expected={employee_email}|{paperclip_issue_id or —}
     ```
+  - Drop this message from `new_messages`. Do NOT create `[HR-PROCESS-REPLY]` for it.
 
-    - **`is_match == true`** → treat as a normal reply (add this message's `messageId` to the in-progress reply list for step 4 below — same handling as step 3a results).
-    - **`is_match == false`** (sender does NOT match `employee_email` or `alternate_candidate_email` exactly after normalization) → MUST take the `reply_from_alternate_sender` path:
-      - `outlook_send_email` to `{human_in_loop_email}`:
-        - subject: `HR Alert: Possible reply from alternate address — {employee_full_name}`
-        - isHtml: true
-        - body: `<p>Hi,</p><p>A possible reply was detected for <strong>{employee_full_name}</strong> from an unrecognized email address:</p><table><tr><td><strong>Expected:</strong></td><td>{employee_email}</td></tr><tr><td><strong>Alternate on file:</strong></td><td>{alternate_candidate_email or "—"}</td></tr><tr><td><strong>Actual sender:</strong></td><td>{message.from.email}</td></tr></table><p>Please review and confirm if this is from the candidate. Case ID: {case_id}</p><p>Regards,<br>HR Automation</p>`
-      - Append to audit-log:
-        ```
-        {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|reply_from_alternate_sender|Notified human — subject-match reply from unrecognized sender|sender={message.from.email} expected={employee_email}|{paperclip_issue_id or —}
-        ```
-      - Do NOT add this message to the reply list. Do NOT create `[HR-PROCESS-REPLY]` for it.
-      - Skip nudge for this tick; continue to next case.
+**NO partial-match, NO typo-tolerance.** Exact normalized equality only. Permissive matching is the root cause of cross-case sub-issue duplication (one human's reply ending up routed to a different person's case).
 
-    **NO partial-match, NO typo-tolerance, NO subject-only fallback at the routing step.** If the sender email is not an EXACT normalized match for `employee_email` or `alternate_candidate_email`, the message goes to the alternate-sender path. Humans confirm whether it's a real reply before pipeline acts on it. Permissive matching is the root cause of cross-case sub-issue duplication (one human's reply ending up routed to a different person's case).
+After 3c filtering, `new_messages` is the verified-sender reply set for this case.
 
-4. IF one or more replies found (from step 3a or 3b, both gated by the strict sender check above):
+### 4 — Create the reply sub-issue (idempotent against `processed_message_ids`)
+
+IF `new_messages` is empty → no new replies for this case this tick. Proceed to STEP 3 (nudge check).
+
+IF `new_messages` is non-empty:
 
    **Collect ALL reply messageIds for this case first (do not process one-by-one):**
-   → messageId_list = all reply messages sorted chronologically (oldest first)
-   → N = total count
+   → `messageId_list = [m.id for m in new_messages]` sorted chronologically (oldest first)
+   → N = `len(messageId_list)`
+
+   **Append all of `messageId_list` to `run_state.process_reply.processed_message_ids[]` (TASK-007)** immediately after the sub-issue creation succeeds (Step 4 success path below) — this is the idempotency anchor. Doing it after sub-issue creation ensures a failed create can be retried next tick without losing the message-id record.
 
    **Determine title prefix by employee_type:**
    - `intern_fte_form` → title prefix: `[INTERN-FTE-FORM]`
    - all other types   → title prefix: `[HR-PROCESS-REPLY]` (this is the new prefix; the orchestrator in `employee-onboarding.md` also accepts the legacy `[HR-ONBOARDING-REPLY]` for backward compat — for new sub-issues always use `[HR-PROCESS-REPLY]`)
 
-   **Build child issue description (key-value lines):**
+   **Build child issue description (key-value lines) — 4-way linkage required (TASK-015):**
+
+   Every sub-issue carries four linkage fields so the tree is recoverable from any single field if the others rot:
+   - `case_id` (audit-log key)
+   - `parent_issue_id` (Paperclip tree key)
+   - `run_state_path` (filesystem key)
+   - `paperclip_issue_id` (explicit copy of parent_issue_id for downstream phase files that only consume that field name)
+
    ```
    source: api
    case_id: {case_id}
+   parent_issue_id: {paperclip_issue_id}
+   paperclip_issue_id: {paperclip_issue_id}
+   run_state_path: {run_state_path}
    messageIds: {messageId1},{messageId2},...        ← comma-separated, chronological order
    reply_count: {N}
    employee_email: {employee_email}
@@ -316,11 +493,23 @@ If all asserts pass → proceed with 3a below.
    recruiter_or_hr_email: {recruiter_or_hr_email}
    human_in_loop_email: {human_in_loop_email}
    current_status: {current_status}
-   parent_issue_id: {paperclip_issue_id}
    [IF phone_number non-null:            phone_number: {value}]
    [IF alternate_candidate_email non-null: alternate_candidate_email: {value}]
    [IF intern_fte_form AND role non-null: role: {value}]
    [IF intern_fte_form AND excel_url non-null: excel_url: {value}]
+   ```
+
+   **Parent existence check (TASK-014) — runs BEFORE sub-issue create:**
+   ```
+   GET /api/issues/{paperclip_issue_id}
+   → IF response is 404 OR parent.status IN {done, cancelled}:
+     - Do NOT create the child issue.
+     - Append audit-log row:
+       {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|orphan_child_prevented|Parent issue {paperclip_issue_id} not active (status={parent.status or "404"}) — refused to create [HR-PROCESS-REPLY] child|messageIds={messageId_list comma-joined}|{paperclip_issue_id}
+     - Notify {human_in_loop_email}: subject `HR Alert: Orphan reply sub-issue prevented — {employee_full_name}`, body explains the parent state and lists the messageIds the candidate sent so the human can route manually.
+     - Skip sub-issue create. Skip the processed_message_ids append below (next tick will re-detect and re-evaluate parent).
+     - Continue to next case.
+   → ELSE: proceed to the POST below.
    ```
 
    **Create ONE child issue (one per case per tick — not one per message):**
@@ -339,6 +528,12 @@ If all asserts pass → proceed with 3a below.
    → Agent picks it up by title prefix → reads `messageIds` → processes each in sequence → jumps to Phase 4.
 
    On success:
+   - Persist `processed_message_ids` (TASK-007):
+     - `sharepoint_read_file path="{run_state_path}"` → parse JSON.
+     - Initialise `run_state.process_reply.processed_message_ids = []` if absent.
+     - Append every id from `messageId_list` to `processed_message_ids` (skip duplicates — set semantics).
+     - `sharepoint_write_file` the updated run-state.
+     - On write failure after one retry: log warning, append audit-log row `event=heartbeat_skip` with brief_reason `processed_message_ids write failed — re-poll next tick`, continue. (The sub-issue exists; the next tick conversationId diff will produce the same `new_messages` set, but `processed_message_ids` will be empty so duplicates COULD be created. Acceptable as a transient state — `process-reply.md` Step 4 dedups on raw_upload filename+round, and the heartbeat will retry the run-state write on the very next tick.)
    - Append to audit-log:
      ```
      {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|{current_status}|reply_detected|Reply sub-issue created — {N} message(s) queued|Sub-issue: {created_issue_id} Parent: {paperclip_issue_id}|{paperclip_issue_id}
@@ -360,6 +555,66 @@ If all asserts pass → proceed with 3a below.
 
 5. IF no reply found:
    → Proceed to STEP 3 (nudge check)
+
+---
+
+## STEP 2.5 — Global inbox sweep (belt-and-suspenders, TASK-008)
+
+This step runs ONCE per tick (not per-case). It catches replies the per-case poll (STEP 2 3a/3b) missed for any reason — Outlook conversationId index lag, transient API drop, run-state field corruption.
+
+**Inputs (NO hardcoded keywords, subjects, or addresses):**
+
+- `monitored_mailboxes` — list from `HR-Onboarding/config.md`. Sweep runs once per mailbox.
+- `active_conversation_ids` — set of every non-null `run_state.send_initial.conversation_id` across `email_poll_bucket_clean` ∪ `approval_poll_bucket`. Built in memory; not stored.
+- `active_employee_emails` — normalized set of every `employee_email` and `alternate_candidate_email` across the same buckets.
+- `tick_start` — `heartbeat_start_timestamp` from STEP 1.
+- `lookback = tick_start − 1h` — bounded lookback to keep result set small and to overlap the prior tick safely (idempotency from `processed_message_ids` removes any duplicate routing).
+
+### Step 2.5a — Sweep each monitored mailbox
+
+For each mailbox in `monitored_mailboxes`:
+
+```
+outlook_search_emails
+  mailbox       = "{mailbox}"
+  receivedAfter = "{lookback}"
+  limit         = 200
+→ Returns recent inbound messages (no from/subject filter applied here — this is the sweep).
+```
+
+If the call returns > 200 results (page-limit hit): log a warning in the tick summary; the per-case poll (3a) already covered the high-frequency case. Continue without escalating — increase `limit` only if multiple ticks repeatedly clip.
+
+### Step 2.5b — Route each result by conversationId, then by sender
+
+For each message returned by 2.5a:
+
+```
+matched_case = first case in (email_poll_bucket_clean ∪ approval_poll_bucket) where
+                 case.run_state.send_initial.conversation_id == message.conversationId
+                 AND case.run_state.send_initial.conversation_id IS NOT NULL
+```
+
+**Case A — conversationId match found:**
+- Check `message.id` against that case's `run_state.process_reply.processed_message_ids`. If already present → skip (already routed by 3a this tick or in a prior tick).
+- Run the STRICT sender verification from STEP 2 3c against this message. If sender check fails → take the `reply_from_alternate_sender` path scoped to the matched case (audit row + human notify, do not route).
+- Otherwise → merge this message into that case's `new_messages` for STEP 2 step 4 sub-issue creation. If STEP 2 already created a sub-issue for this case this tick, append a comment to the existing sub-issue listing the additional messageIds and update `processed_message_ids` accordingly. Do NOT create a second sub-issue per case per tick.
+
+**Case B — no conversationId match, sender matches an active case's `employee_email` or `alternate_candidate_email`:**
+- Treat as a legacy reply (likely from a case sent before TASK-005 shipped). Route to that case using the same sub-issue logic as 3b legacy fallback. Log brief_reason `routed via global sweep — conversation_id null on case`.
+
+**Case C — no conversationId match, sender matches no active case:**
+- Log an `orphan_email_detected` audit row (case_id = `—`, brief_reason names the sender + subject + messageId). Notify `{primary_human_in_loop_email}` from `HR-Onboarding/config.md` ONCE per messageId. Dedup on subsequent ticks by messageId presence in audit-log.
+- Do NOT create any sub-issue. The orphan email might be unrelated, a forwarded thread, or a case missing from both buckets — human inspection required.
+
+### Step 2.5c — Tick counters
+
+Increment in-memory tick counters used by STEP 6.1 summary:
+
+- `replies_caught_via_per_case_poll` — count of messages routed in STEP 2 3a/3b before 2.5 ran.
+- `replies_caught_via_global_sweep` — count of messages routed in Case A and Case B of 2.5b.
+- `orphan_emails` — count of Case C messages this tick.
+
+Each new audit-log row written by 2.5b satisfies the STEP 6 enumeration gate invariant for the matched case (when applicable), the same as STEP 2 rows.
 
 ---
 
@@ -386,7 +641,14 @@ If all asserts pass → proceed with 3a below.
    ```
    → Skip this case
 
-9. IF `elapsed` ≥ 24h AND `current_status` NOT `stalled`:
+8b. **Nudge suppression for approval-stage cases (TASK-018):** IF `current_status == awaiting_human_verification`:
+   → Append to audit-log:
+   ```
+   {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|awaiting_human_verification|heartbeat_tick|No nudge — case awaiting human approver, not candidate|elapsed_since_outbound={elapsed}|{paperclip_issue_id or —}
+   ```
+   → Skip nudge for this case. (Reply-poll already ran in STEP 2 / 2.5 — that path is what TASK-018 enables. Approval-poll runs in STEP 5. Nudges are for cases waiting on the candidate; this case is waiting on the approver, who has their own escalation path in STEP 5 Branch P4.)
+
+9. IF `elapsed` ≥ 24h AND `current_status` NOT IN (`stalled`, `awaiting_human_verification`):
    → Check audit-log (already loaded in STEP 1): has `reminder_1_sent` or `reminder_2_sent` event been sent for this `case_id` in the last 24h?
      - `reminder_1_sent` row exists AND its timestamp is < 24h ago → skip (avoid duplicate nudge)
      - `reminder_2_sent` row exists AND its timestamp is < 24h ago → skip (avoid duplicate nudge)
@@ -536,27 +798,39 @@ If all asserts pass → proceed with 3a below.
 
 This step processes cases in the **approval-poll bucket** built in STEP 1 — those with `current_status == awaiting_human_verification`. It does NOT process email-poll bucket cases.
 
+**Per-case invariant (TASK-003):** every case in the approval-poll bucket MUST emit ≥1 audit row before this step is considered complete for that case. At minimum, an `approval_polled` row (the poll result itself) — even when the approval is still `pending` and no further action follows. Skipping a case because "it's still pending and unchanged" is a silent skip — STEP 6 enumeration gate detects it.
+
 For each case in the approval-poll bucket:
 
-### 5a — Compute run_state_path (rehire-aware) and read run-state.json
+### 5a — Resolve run_state_path (authoritative, TASK-010) and read run-state.json
 
-Use the regex in `_shared.md § §11` Heartbeat rehire parsing to extract date_of_joining and optional rehire_N from `case_id`:
-```
-ARCHIVE-AWARE PARSE:
-case_id matches /^(.+@.+)-(\d{4}-\d{2}-\d{2})(?:-rehire-(\d+))?$/
-groups: email_part, doj, rehire_N (may be null)
+Path resolution uses a layered approach. The first source that returns a working file wins. Never hardcode a path. Never derive a path from agent memory.
 
-folder_suffix = "" IF rehire_N is null ELSE "-rehire-{rehire_N}"
-base_folder   = "HR-Onboarding/{employee_full_name} - {doj}{folder_suffix}"
-run_state_path = "{base_folder}/run-state.json"
-```
+**Resolution order (try each in turn, stop on first success):**
 
-```
-sharepoint_read_file path="{run_state_path}"
-→ Parse JSON.
-→ IF file missing → append audit-log row with event=heartbeat_skip, brief_reason="run-state.json missing for awaiting-approval case at {run_state_path}". Notify {human_in_loop_email}. Skip this case.
-→ ON SUCCESS: ALSO read run_state.base_folder and run_state.run_state_path from the JSON. If they disagree with the heartbeat-computed path, log a warning but USE the run-state-stored values (orchestrator-stored paths are authoritative — defensive against heartbeat regex bugs).
-```
+1. **Regex compute (legacy primary):** apply `_shared.md § §11` Heartbeat rehire parsing to extract date_of_joining and optional rehire_N from `case_id`:
+   ```
+   case_id matches /^(.+@.+)-(\d{4}-\d{2}-\d{2})(?:-rehire-(\d+))?$/
+   groups: email_part, doj, rehire_N (may be null)
+   folder_suffix     = "" IF rehire_N is null ELSE "-rehire-{rehire_N}"
+   regex_base_folder = "HR-Onboarding/{employee_full_name} - {doj}{folder_suffix}"
+   regex_path        = "{regex_base_folder}/run-state.json"
+   ```
+   Try `sharepoint_read_file path="{regex_path}"`. On success → parse JSON, continue to authoritative-check below.
+
+2. **Run-state-stored path (authoritative when regex succeeded):** after parsing the JSON, ALSO read `run_state.base_folder` and `run_state.run_state_path` from the JSON. If they disagree with the regex-computed path, log a warning but USE the run-state-stored values — orchestrator-stored paths are authoritative. Re-read the JSON from the stored path if the values differ (defensive — protects against heartbeat regex bugs).
+
+3. **Case-tracker header fallback (regex failed entirely):** if step 1 returned 404 or unparseable JSON, fall back to:
+   ```
+   tracker_path = "{regex_base_folder}/case-tracker.md"
+   sharepoint_read_file path="{tracker_path}"
+   → Parse the Header section for the "Run-state Path" field.
+   → If present and points to a different path → try sharepoint_read_file on that path.
+   ```
+
+4. **All three failed:** append audit-log row with event=heartbeat_skip, brief_reason=`Cannot resolve run-state path — regex_path={regex_path} stored_path={stored or "n/a"} tracker_fallback={tracker or "n/a"}`. Notify `{human_in_loop_email}`. Mark the case `blocked` (column 8 = `blocked`, event = `phase_blocked`). Skip this case for this tick.
+
+Trust ordering: run-state-stored values > regex compute > case-tracker fallback. Anything below the topmost successful source is a sanity check, not a source of truth.
 
 Extract:
 ```
@@ -609,13 +883,25 @@ Therefore: the audit-log row + child create are NOT idempotent across ticks. To 
 2. P1c — Only AFTER successful child create, append the `approval_approved` audit-log row that flips `current_status` to `verified_by_human`.
 3. If child create fails: do NOT write the row. The case stays in `awaiting_human_verification` and the next tick retries via P1a (which will not find a child) + this branch.
 
-**P1b — Create child:**
+**P1b — Parent existence check (TASK-014) then create child:**
+
+```
+GET /api/issues/{parent_issue_id}
+→ IF response is 404 OR parent.status IN {done, cancelled}:
+  - Do NOT create the [HR-UPLOAD-SP] child.
+  - Append audit-log row:
+    {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|awaiting_human_verification|orphan_child_prevented|Parent issue {parent_issue_id} not active (status={parent.status or "404"}) — refused to create [HR-UPLOAD-SP] after approval|approval_id={approval_id}|{parent_issue_id}
+  - Notify {human_in_loop_email}: subject `HR Alert: Orphan upload sub-issue prevented — {employee_full_name}`, body explains parent state and the approved approval_id.
+  - Skip this case. Do NOT write approval_approved row.
+→ ELSE: proceed to POST below.
+```
+
 ```
 POST /api/companies/{PAPERCLIP_COMPANY_ID}/issues
 Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
 {
   "title": "[HR-UPLOAD-SP] {employee_full_name} — Phase 9 final upload",
-  "description": "phase_file: routines/employee-onboarding/upload-sharepoint.md\nrun_state_path: {run_state_path}\nparent_issue_id: {parent_issue_id}\ncase_id: {case_id}\napproval_id: {approval_id}",
+  "description": "phase_file: routines/employee-onboarding/upload-sharepoint.md\nrun_state_path: {run_state_path}\nparent_issue_id: {parent_issue_id}\ncase_id: {case_id}\napproval_id: {approval_id}\npaperclip_issue_id: {parent_issue_id}",
   "assigneeAgentId": "{HR_AGENT_ID}",
   "parentId": "{parent_issue_id}",
   "status": "todo",
@@ -720,32 +1006,69 @@ elapsed_since_approval_created = now − approval_created_at
 
 ### 5d — IT-setup email retry sweep
 
-Phase 10 (`close-case.md`) marks `run_state.close_case.it_setup_email_sent = false` when the IT setup email fails. This sweep scans completed cases for that flag and retries up to 3 times.
+Phase 10 (`close-case.md`) marks `run_state.close_case.it_setup_email_sent = false` when the IT setup email fails (event `case_completion_partial`). On a successful retry by this sweep, when both mails are then proven sent, also write the upgrade row `case_completed` so downstream consumers see the same end-to-end audit guarantee as the in-phase success path.
 
 ```
-SCAN audit-log for rows where event = case_completed (recent N days — limit to last 14 days to avoid scanning history forever):
-  FOR EACH such case:
-    Compute base_folder and run_state_path per Step 5a regex.
+SCAN audit-log for rows where event IN (case_completed, case_completion_partial) within the last 14 days:
+  FOR EACH such case (dedup by case_id — process each case at most once per tick):
+    Resolve base_folder and run_state_path per Step 5a (authoritative resolution — TASK-010).
     sharepoint_read_file path="{run_state_path}"
-    → IF run_state.close_case.it_setup_email_sent == true → skip case.
-    → IF run_state.close_case.it_setup_retries >= 3 → skip case (max retries reached; human must investigate). Audit-log row event=escalated brief_reason="IT setup email max retries exhausted" ONCE — dedup by case_id.
+    → IF run_state.close_case.it_setup_email_sent == true → skip case (already sent).
+    → IF run_state.close_case.it_setup_retries >= 3 → skip case (max retries reached). Audit-log row event=escalated brief_reason="IT setup email max retries exhausted" ONCE — dedup by case_id.
     → ELSE retry:
       outlook_send_email using _email-templates.md § §IT_SETUP
+        mailbox: {primary monitored mailbox from HR-Onboarding/config.md MONITORED_MAILBOXES — never hardcode an address}
         to: $IT_SUPPORT_EMAIL
         CC: {human_in_loop_email}, {recruiter_or_hr_email}
       On success:
         - run_state.close_case.it_setup_email_sent = true
         - run_state.close_case.it_setup_message_id = {messageId}
         - run_state.close_case.it_setup_retries = N + 1
+        - run_state.close_case.status = "complete" (was "partial_it")
+        - run_state.close_case.final_status = "completed"
         - sharepoint_write_file run_state.json
         - Append audit-log row:
           {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|completed|it_setup_retry|IT setup email retry {N+1}/3 succeeded|messageId={it_setup_message_id}|{parent_issue_id}
+        - IF the prior latest row for this case_id was event=case_completion_partial: ALSO append the end-to-end delivery row (TASK-013), unifying the audit trail:
+          {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|completed|case_completed|Onboarding upgraded to fully closed — IT setup mail delivered via heartbeat retry|candidate_msg={run_state.close_case.candidate_completion_message_id} it_msg={run_state.close_case.it_setup_message_id}|{parent_issue_id}
       On failure:
         - run_state.close_case.it_setup_retries = N + 1
         - sharepoint_write_file run_state.json
         - Append audit-log row:
           {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|completed|it_setup_retry|IT setup email retry {N+1}/3 failed|error={error}|{parent_issue_id}
         - On 3rd failure, notify human (subject `HR Alert: IT setup email failed after 3 retries — {employee_full_name}`).
+```
+
+### 5d-bis — Candidate completion email retry sweep (TASK-012)
+
+Symmetric to 5d. Phase 10 blocks (does not write `case_completed`) when the candidate completion mail fails, but a future Phase-10 retry / manual re-trigger may leave `run_state.close_case.candidate_completion_email_sent = false`. This sweep self-heals up to 3 retries.
+
+```
+SCAN audit-log for rows where event IN (case_completed, case_completion_partial) within the last 14 days:
+  FOR EACH such case (dedup by case_id):
+    Resolve run_state_path per Step 5a (TASK-010).
+    sharepoint_read_file path="{run_state_path}"
+    → IF run_state.close_case.candidate_completion_email_sent == true → skip case.
+    → IF run_state.close_case.candidate_completion_retries >= 3 → skip case. Audit-log row event=escalated brief_reason="Candidate completion email max retries exhausted" ONCE — dedup by case_id.
+    → ELSE retry:
+      outlook_send_email using _email-templates.md § §COMPLETION_CANDIDATE
+        mailbox: {primary monitored mailbox from HR-Onboarding/config.md MONITORED_MAILBOXES — never hardcode}
+        to: {employee_email}
+        CC: {alternate_candidate_email if non-null}
+      On success:
+        - run_state.close_case.candidate_completion_email_sent = true
+        - run_state.close_case.candidate_completion_message_id = {messageId}
+        - run_state.close_case.candidate_completion_retries = N + 1
+        - sharepoint_write_file run_state.json
+        - Append audit-log row:
+          {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|completed|completion_retry|Candidate completion email retry {N+1}/3 succeeded|messageId={candidate_completion_message_id}|{parent_issue_id}
+        - IF run_state.close_case.it_setup_email_sent is ALSO true (both mails proven): ALSO append `case_completed` row per TASK-013 format, identical to 5d.
+      On failure:
+        - run_state.close_case.candidate_completion_retries = N + 1
+        - sharepoint_write_file run_state.json
+        - Append audit-log row:
+          {now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|completed|completion_retry|Candidate completion email retry {N+1}/3 failed|error={error}|{parent_issue_id}
+        - On 3rd failure, notify human (subject `HR Alert: Candidate completion email failed after 3 retries — {employee_full_name}`).
 ```
 
 ### 5e — Orphan parent-PATCH retry sweep
@@ -781,9 +1104,32 @@ SCAN audit-log for rows where event = case_completed (recent 14 days):
 
 ## STEP 6 — Heartbeat completion log
 
+### STEP 6.0 — Enumeration gate (TASK-002) — runs BEFORE the heartbeat_tick summary row
+
+This gate verifies the `## NON-NEGOTIABLE` rule mechanically. It MUST run before any summary row is written.
+
+1. Re-read `HR-Onboarding/audit-log.csv` (fresh read — picks up rows written during this tick).
+2. Collect all rows whose timestamp is `>= heartbeat_start_timestamp` (captured at the top of STEP 1).
+3. Build `processed_case_ids` = the distinct set of `case_id` values from those rows where `case_id != '—'` and `case_id` is in the original `manifest_case_ids` list.
+4. Compute `missing_case_ids = manifest_case_ids − processed_case_ids` (set difference).
+5. **If `missing_case_ids` is non-empty:**
+   - Append to audit-log:
+     ```
+     {now}|—|—|—|—|—|—|—|heartbeat_enumeration_failed|Cases present in tick manifest but produced no audit row this tick|missing: {missing_case_ids comma-joined}|—|—
+     ```
+   - `outlook_send_email` to every distinct `human_in_loop_email` that appears in the missing cases' audit-log rows:
+     - subject: `HR Alert: Heartbeat tick failed enumeration gate`
+     - isHtml: true
+     - body: `<p>Hi,</p><p>The heartbeat tick at {heartbeat_start_timestamp} did not visit every active case. The following case_ids were in the tick manifest but produced no audit row:</p><ul>{for each missing case_id: <li><code>{case_id}</code></li>}</ul><p>This indicates the heartbeat narrowed scope to a subset of cases. The next tick will retry. If this repeats, manual inspection is required.</p><p>Regards,<br>HR Automation</p>`
+   - Teams notification: `_email-templates.md § §Teams_Escalation` with reason = `Heartbeat enumeration gate failed — {len(missing_case_ids)} case(s) missed`.
+   - **Do NOT write the `heartbeat_tick` clean-summary row below.** The tick exits in failure state. The next scheduled tick rebuilds the bucket from scratch and reprocesses everything.
+6. **If `missing_case_ids` is empty:** proceed to STEP 6.1 below — write the standard `heartbeat_tick` summary row.
+
+### STEP 6.1 — Heartbeat completion summary (only when STEP 6.0 passes)
+
 After processing all email-poll-bucket and approval-poll-bucket cases (and the IT-retry + parent-patch sweeps), append to audit-log (13 columns, col-13 = `—` for tick rows):
     ```
-    {now}|—|—|—|—|—|—|—|heartbeat_tick|Processed {E} email-poll, {A} approval-poll, {IR} IT-retry, {PR} parent-patch cases. Replies detected: {R}. Nudges sent: {X}. Cases stalled: {S}. Approvals approved: {AA}. Approvals rejected/withdrawn: {AR}. Pending approvals: {AP}. Approvals escalated (14d): {AE}. Duplicate cases paused: {DUP}.|—|—|—
+    {now}|—|—|—|—|—|—|—|heartbeat_tick|Processed {E} email-poll, {A} approval-poll, {IR} IT-retry, {CR} completion-retry, {PR} parent-patch, {REC} recovered cases. Replies detected: {R} (per_case:{R_PC} sweep:{R_SW}). Nudges sent: {X}. Cases stalled: {S}. Approvals approved: {AA}. Approvals rejected/withdrawn: {AR}. Pending approvals: {AP}. Approvals escalated (14d): {AE}. Duplicate cases paused: {DUP}. Orphan emails: {ORPH}. Transient failures this tick: {TF}.|—|—|—
     ```
 
 ### STEP 6a — Anti-thrash status normalization

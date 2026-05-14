@@ -309,6 +309,7 @@ Write case-tracker AFTER all updates above (one write, not multiple).
 Append the round to `run_state.process_reply.rounds[]`:
 ```json
 "process_reply": {
+  "processed_message_ids": [ ...existing ids..., <new ids appended below> ],
   "rounds": [
     ...existing rounds...,
     {
@@ -325,6 +326,13 @@ Append the round to `run_state.process_reply.rounds[]`:
   ]
 }
 ```
+
+**Append-to-`processed_message_ids` rule (TASK-007):**
+
+- Initialise `run_state.process_reply.processed_message_ids = []` if absent (legacy run-state pre-dating TASK-007).
+- For every id in this round's `messageIds_processed`: append to `processed_message_ids` if not already present (set semantics — no duplicates).
+- Never reorder existing entries. Never remove entries (even after withdrawal / cancellation — the messageId is still "seen" and must not produce a fresh sub-issue from a heartbeat re-poll).
+- The heartbeat (`email-heartbeat.md` STEP 2 3a diff) reads this list to compute `new_messages`. Skipping the append here will cause the same reply to be routed twice on the next tick.
 
 Update top-level fields:
 - If `final_classification ∈ {complete, partial}` → `current_phase = "validate_docs"`.
@@ -373,7 +381,7 @@ Create the `[HR-VALIDATE-DOCS]` child issue:
 POST /api/companies/{PAPERCLIP_COMPANY_ID}/issues
 {
   "title": "[HR-VALIDATE-DOCS] {employee_full_name} — round {round_index} validation",
-  "description": "phase_file: routines/employee-onboarding/validate-docs.md\nrun_state_path: {run_state_path}\nparent_issue_id: {parent_issue_id}\ncase_id: {case_id}\nround_index: {round_index}",
+  "description": "phase_file: routines/employee-onboarding/validate-docs.md\nrun_state_path: {run_state_path}\nparent_issue_id: {parent_issue_id}\npaperclip_issue_id: {parent_issue_id}\ncase_id: {case_id}\nround_index: {round_index}",
   "assigneeAgentId": "{PAPERCLIP_AGENT_ID}",
   "parentId": "{parent_issue_id}",
   "status": "todo",

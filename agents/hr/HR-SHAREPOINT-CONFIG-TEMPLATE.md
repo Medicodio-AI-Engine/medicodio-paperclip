@@ -31,7 +31,23 @@ AUDIT_LOG_PATH: HR-Onboarding/audit-log.csv
 DEFAULT_HR_NAME: HR Contact Name
 DEFAULT_HR_EMAIL: hr@example.com
 DEFAULT_HUMAN_IN_LOOP_EMAIL: hr-reviewer@example.com
+PRIMARY_HUMAN_IN_LOOP_EMAIL: hr-reviewer@example.com
 ```
+
+`PRIMARY_HUMAN_IN_LOOP_EMAIL` is the fallback inbox for orphan-email alerts emitted by `email-heartbeat.md` STEP 2.5b Case C (sweep found a message whose conversationId / sender matches no active case). Set to the same address as `DEFAULT_HUMAN_IN_LOOP_EMAIL` unless you have a dedicated triage mailbox.
+
+---
+
+## Monitored Mailboxes
+
+```
+MONITORED_MAILBOXES:
+  - hr@example.com
+```
+
+The heartbeat (`email-heartbeat.md` STEP 2 + STEP 2.5) polls each mailbox in this list. Every onboarding case's `run_state.send_initial.inbox_used` MUST appear here, otherwise replies to that case go undetected. Add additional addresses if your org sends onboarding mail from more than one inbox (e.g. a dedicated HR-automation mailbox separate from the recruiter mailbox).
+
+Do NOT hardcode mailbox addresses inside `email-heartbeat.md` or `send-initial.md`. Read this list at runtime.
 
 ---
 

@@ -169,7 +169,10 @@ outlook_send_email
   body          = "{body from template, all placeholders resolved, must include excel_url link}"
 ```
 
-Capture the returned `messageId` as `outlook_message_id`.
+Capture from the response:
+- `messageId` → store as `outlook_message_id` (existing).
+- `conversationId` → store as `conversation_id` (TASK-005). This is the Outlook thread key the heartbeat uses for reply detection (`email-heartbeat.md` STEP 2 + Search Protocol). If the field is absent or empty, leave `conversation_id` null — the heartbeat will fall back to `from:`/`subject:` search for that case. Do NOT fabricate a value. Do NOT reuse `outlook_message_id` here.
+- The `from` address actually used by the send → store as `inbox_used` (TASK-009). This must match one of the addresses listed in `HR-Onboarding/config.md` `monitored_mailboxes`. If absent in the response, fall back to the configured default sender mailbox (do NOT hardcode an address — read from config).
 
 ### Step 4a — Post-send schema assert (required)
 
@@ -236,12 +239,20 @@ Append:
   "sent_to": "{employee_email}",
   "cc": ["{recruiter_or_hr_email}"],
   "outlook_message_id": "{outlook_message_id}",
+  "conversation_id": "{conversation_id or null}",
+  "inbox_used": "{inbox_used}",
   "email_tool": "outlook",
-  "subject": "Documents Required for Onboarding – {employee_full_name}"
+  "subject": "{actual subject from the rendered template, with {employee_full_name} substituted}"
 }
 ```
 
 `email_tool` is REQUIRED and MUST be the literal string `outlook`. `email-heartbeat.md` STEP 2 asserts this before polling for replies. Any other value (or missing field) makes the case unrecoverable by heartbeat — it will fall into the `heartbeat_channel_mismatch` path.
+
+`conversation_id` is the authoritative thread key. Heartbeat per-case reply poll matches Outlook messages whose `conversationId` equals this value. Subject-text matching is a fallback only and is forbidden as the primary input (per `email-heartbeat.md ## Search Protocol`).
+
+`inbox_used` is the FROM-address the send went through. Heartbeat poll must target the mailbox listed in `HR-Onboarding/config.md` `monitored_mailboxes` whose address matches `inbox_used`. Polling the wrong mailbox loses replies.
+
+Do NOT hardcode the subject line. It is derived per-case from the template + `employee_full_name`.
 
 Add `send_initial` to `phases_complete[]`. Set `current_phase = "await_reply"`. Set `last_updated = now`.
 
@@ -284,7 +295,7 @@ POST /api/companies/{PAPERCLIP_COMPANY_ID}/issues
 Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
 {
   "title": "[HR-AWAIT-REPLY] {employee_full_name} — awaiting candidate reply",
-  "description": "phase_file: routines/employee-onboarding/await-reply.md\nrun_state_path: {run_state_path}\nparent_issue_id: {parent_issue_id}\ncase_id: {case_id}",
+  "description": "phase_file: routines/employee-onboarding/await-reply.md\nrun_state_path: {run_state_path}\nparent_issue_id: {parent_issue_id}\npaperclip_issue_id: {parent_issue_id}\ncase_id: {case_id}",
   "assigneeAgentId": "{PAPERCLIP_AGENT_ID}",
   "parentId": "{parent_issue_id}",
   "status": "todo",

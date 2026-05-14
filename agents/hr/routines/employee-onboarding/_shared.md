@@ -116,6 +116,13 @@ Every audit-log row's `current_status` MUST match this table for the given `even
 | `it_setup_retry` | (unchanged) |
 | `parent_patch_retry` | (unchanged) |
 | `orphan_raw_archived` | (unchanged) |
+| `heartbeat_start` | (unchanged) |
+| `heartbeat_enumeration_failed` | (unchanged) |
+| `orphan_email_detected` | (unchanged) |
+| `case_completion_partial` | `completed` |
+| `completion_retry` | (unchanged) |
+| `orphan_child_prevented` | (unchanged) |
+| `case_recovered_from_paperclip_index` | (derived from `run_state.current_phase` per email-heartbeat.md Step 1d table) |
 
 **Special case — `reply_detected` with terminal classification:**
 When a candidate reply is classified as `withdrawal` or `cancellation` (see `process-reply.md` Step 4d), the `reply_detected` row written by Step 6c MUST still map to `awaiting_document_submission` per this table. The terminal status is set by the SECOND row that Step 6c writes (`event = case_withdrawn` → `withdrawn`, or `event = case_cancelled` → `cancelled`). The two rows together preserve §5 consistency.
@@ -324,6 +331,11 @@ Created by orchestrator (Phase 0). Read + updated by every phase. Never deleted.
     "nudge_1_sent_at": "{ISO} or null",
     "nudge_2_sent_at": "{ISO} or null"
   },
+  "heartbeat": {                                                // (TASK-017 — populated by email-heartbeat per case)
+    "transient_failures": 0,                                    // int — consecutive ticks with a transient API failure for this case (outlook_search_emails, approval_polled, run-state read). Reset to 0 on any successful op for this case in a tick. ≥3 → escalate per email-heartbeat.md STEP 2/STEP 5 transient-failure path.
+    "last_transient_failure_at": "{ISO} or null",
+    "last_transient_failure_reason": "..."                      // short label: "outlook_search_failed" | "approval_poll_failed" | "run_state_read_failed"
+  },
   "validate_inputs": {
     "status": "complete",
     "completed_at": "{ISO}",
@@ -338,9 +350,12 @@ Created by orchestrator (Phase 0). Read + updated by every phase. Never deleted.
     "sent_to": "{employee_email}",
     "cc": ["{recruiter_or_hr_email}"],
     "outlook_message_id": "...",                                 // non-empty Outlook id; required when email_tool=outlook
+    "conversation_id": "...",                                    // (populated by Phase 2 send) — Outlook thread key. Heartbeat reply detection uses this as the authoritative thread match (see email-heartbeat.md STEP 2 + Search Protocol). Null only on legacy cases sent before TASK-005 — heartbeat falls back to from:/subject: search in that case.
+    "inbox_used": "...",                                         // (populated by Phase 2 send) — email address the initial mail was sent FROM. Heartbeat polls only mailboxes listed in HR-Onboarding/config.md `monitored_mailboxes`. Used to route the reply poll to the correct mailbox.
     "email_tool": "outlook"                                      // REQUIRED. one of: outlook | resend. heartbeat asserts this == "outlook" before polling Outlook for replies (see email-heartbeat.md STEP 2 channel cross-check). Resend forbidden for 1:1 transactional per AGENTS.md.
   },
   "process_reply": {
+    "processed_message_ids": [],                                 // (populated by Phase 4 across rounds) — flat array of every Outlook messageId already routed through process-reply. Heartbeat uses this for idempotent diff against the conversation thread (see email-heartbeat.md STEP 2 + TASK-007). Append-only. Never reorder, never remove.
     "rounds": [
       {
         "round": 1,

@@ -169,21 +169,27 @@ All downstream steps (Step 6, 7a, 7b, 7d, 8b, 9) read `validator_result`, NOT `r
 
 ---
 
-## Step 4 — MANDATORY: outlook_read_attachment on every non-archive attachment (defensive re-read)
+## Step 4 — MANDATORY: outlook_read_attachment on every non-archive, non-Excel attachment (defensive re-read)
 
-This step is a DEFENSIVE RE-READ. The skill at `agents/hr/skills/document-validator.md` SHOULD already call `outlook_read_attachment` on every attachment internally, but this phase file MUST NOT trust that assumption — future edits to the skill could remove or shortcut the call. Always perform the read explicitly here, regardless of what the skill did.
+This step is a DEFENSIVE RE-READ. The skill at `agents/hr/skills/document-validator.md` SHOULD already call `outlook_read_attachment` on every non-Excel attachment internally, but this phase file MUST NOT trust that assumption — future edits to the skill could remove or shortcut the call. Always perform the read explicitly here, regardless of what the skill did.
 
 **Do NOT delete this step even if it feels redundant.**
+
+**HRMS Excel exclusion (hard rule):** for any attachment whose filename ends in `.xlsx` or `.xls`, SKIP this step entirely for that file. Do not call `outlook_read_attachment`. Do not attempt to parse the workbook. Record `"Excel (HRMS form) — presence-only; content not read"` in the per-file log. The human approver at Phase 7+8 Step 8/9 inspects the workbook manually.
 
 For each `attachment` in `attachments_to_validate`:
 
 ```
+IF attachment.filename matches /\.(xlsx|xls)$/i:
+  log "{filename} — Excel — presence-only (HRMS form, not parsed)"
+  continue to next attachment
+
 outlook_read_attachment
   messageId    = "{attachment.messageId}"
   attachmentId = "{attachment.attachmentId}"
 ```
 
-Handling by content type:
+Handling by content type (non-Excel only):
 - Image (`.jpg`, `.jpeg`, `.png`, `.gif`, `.webp`): inspect visually (multimodal).
 - PDF: use returned `extractedText`. If the response contains `SCANNED_PDF_NO_TEXT`, that PDF is scanned-image with no text layer — add to discrepancy list with note `scanned PDF, request candidate re-send as JPG/PNG`.
 - DOCX: use returned `extractedText`.
@@ -192,7 +198,7 @@ Log a one-line entry per file in `validator_result.read_log[]` (or a local list)
 
 For each archive file in `archive_files_skipped`: add to discrepancy list with note `archive file ({filename}) — candidate must re-send unzipped`. Do NOT call `outlook_read_attachment` on archives.
 
-If ANY attachment that should be read fails the read call → add to discrepancy list with note `cannot read attachment {filename} — request re-send`.
+If ANY non-Excel attachment that should be read fails the read call → add to discrepancy list with note `cannot read attachment {filename} — request re-send`. **Never** add a "cannot read" discrepancy for an Excel file — Excel is presence-only by design.
 
 ---
 
@@ -232,6 +238,8 @@ Merge into `final_discrepancy_list`:
 
 For each merged item, also build `documents_involved: [{filename1}, {filename2}, ...]` — the list of attachment filenames the discrepancy points to. This drives per-attachment `verified` derivation below.
 
+**HRMS Excel filter (post-merge):** drop any merged item whose `documents_involved` list contains ONLY filenames ending in `.xlsx`/`.xls`. Excel is presence-only — content-derived flags on Excel must never reach the discrepancy list. If a merged item references both an Excel file AND a non-Excel file, strip the Excel filename out of `documents_involved` but keep the item for the non-Excel file. The `HRMS Onboarding Form (Excel)` checklist row with `present == false` is the ONE exception: keep that item — "Excel missing entirely" is a legitimate discrepancy (it just means the candidate didn't send the file at all).
+
 De-duplicate by note text. The merged list is `final_discrepancy_list`.
 
 ### 6b — Compute decision
@@ -252,12 +260,16 @@ Write back `validator_result.decision = decision`.
 
 For each attachment `a` in `attachments_to_validate`:
 ```
-a.verified = TRUE if all of:
-  - a.filename is NOT in any final_discrepancy_list[].documents_involved
-  - a.filename is NOT in archive_files_skipped
-  - outlook_read_attachment succeeded for this attachment (no `cannot read attachment` discrepancy)
-  - a.filename is NOT in photo_mismatch_set (i.e. not flagged as a mismatched photo source)
-ELSE a.verified = FALSE
+IF a.filename matches /\.(xlsx|xls)$/i:
+  a.verified = TRUE   ← Excel is presence-only. Always verified when received. Human approver
+                        validates field-fill at Phase 7+8 Step 8/9. Never mark Excel verified=FALSE.
+ELSE:
+  a.verified = TRUE if all of:
+    - a.filename is NOT in any final_discrepancy_list[].documents_involved
+    - a.filename is NOT in archive_files_skipped
+    - outlook_read_attachment succeeded for this attachment (no `cannot read attachment` discrepancy)
+    - a.filename is NOT in photo_mismatch_set (i.e. not flagged as a mismatched photo source)
+  ELSE a.verified = FALSE
 ```
 
 Build `attachments_validated = [{filename, messageId, attachmentId, contentType, round, verified, source}, ...]`.
@@ -279,6 +291,12 @@ Read `case-tracker.md`. Make these updates in a single write at the end:
 ### 7a — Document Tracker
 For each row already in the Document Tracker, look up its match in `validator_result.checklist[doc_label]`. Compute Status using this PRECEDENCE (apply top-down — first match wins):
 
+**Special row — `HRMS Onboarding Form (Excel)`:**
+- If `present == true` (any `.xlsx`/`.xls` received in any round) → **`received`** (presence-only; human approver validates field-fill at Phase 7+8). Never set this row to `verified` here, never `rejected` for content reasons.
+- If `present == false` → **`pending`**.
+- Skip rules 1–6 below for this row. It is exempt by design.
+
+For all other rows:
 1. `validator_result.identity_checks.name_match == "fail"` AND this doc is named in `mismatch_flags` → **`rejected`** (identity mismatch overrides everything).
 2. Doc has any flag `"BLOCK"` in `checklist[doc_label].flags` → **`rejected`**.
 3. Doc filename in `photo_mismatch_set` (Step 5 / Step 6c) → **`rejected`**.
@@ -400,7 +418,7 @@ Write the file.
 POST /api/companies/{PAPERCLIP_COMPANY_ID}/issues
 {
   "title": "[HR-REQUEST-RESUB] {employee_full_name} — round {round_index} resubmission",
-  "description": "phase_file: routines/employee-onboarding/request-resubmission.md\nrun_state_path: {run_state_path}\nparent_issue_id: {parent_issue_id}\ncase_id: {case_id}\nround_index: {round_index}",
+  "description": "phase_file: routines/employee-onboarding/request-resubmission.md\nrun_state_path: {run_state_path}\nparent_issue_id: {parent_issue_id}\npaperclip_issue_id: {parent_issue_id}\ncase_id: {case_id}\nround_index: {round_index}",
   "assigneeAgentId": "{PAPERCLIP_AGENT_ID}",
   "parentId": "{parent_issue_id}",
   "status": "todo",
@@ -416,7 +434,7 @@ POST /api/companies/{PAPERCLIP_COMPANY_ID}/issues
 POST /api/companies/{PAPERCLIP_COMPANY_ID}/issues
 {
   "title": "[HR-COMPLETE-SUB] {employee_full_name} — round {round_index} verified upload + approval",
-  "description": "phase_file: routines/employee-onboarding/complete-submission.md\nrun_state_path: {run_state_path}\nparent_issue_id: {parent_issue_id}\ncase_id: {case_id}\nround_index: {round_index}",
+  "description": "phase_file: routines/employee-onboarding/complete-submission.md\nrun_state_path: {run_state_path}\nparent_issue_id: {parent_issue_id}\npaperclip_issue_id: {parent_issue_id}\ncase_id: {case_id}\nround_index: {round_index}",
   "assigneeAgentId": "{PAPERCLIP_AGENT_ID}",
   "parentId": "{parent_issue_id}",
   "status": "todo",

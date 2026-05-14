@@ -108,14 +108,40 @@ Capture returned `messageId` as `it_setup_email_message_id`. If failed, leave as
 
 ---
 
-## Step 5 — Append audit-log rows
+## Step 5 — Append audit-log row (delivery gate — TASK-011 + TASK-013)
 
-Per `_shared.md § §3` and `§4`:
+Compute delivery proof BEFORE writing any row:
 
-Row 5a — case completed:
 ```
-{now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|completed|case_completed|Onboarding case closed — all docs verified and archived. Completion email sent to candidate; IT setup notification sent.|recipients={candidate_recipients joined by "," }; it_email={"sent" or "failed"}|{PAPERCLIP_TASK_ID}
+candidate_ok = candidate_completion_message_id is non-empty string of length >= 20
+it_ok        = it_setup_email_message_id is non-empty string of length >= 20
 ```
+
+Step 3 retry policy already blocks the phase when `candidate_ok` is false, so reaching this step implies `candidate_ok == true`. The decision below is therefore driven by `it_ok`.
+
+### Step 5a — Branch on it_ok
+
+**Branch — `it_ok == true` (both mails proven sent):**
+
+Append exactly one audit-log row, event = `case_completed`. The brief_reason includes BOTH messageIds verbatim — this is the end-to-end delivery audit (TASK-013):
+
+```
+{now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|completed|case_completed|Onboarding closed — candidate completion mail + IT setup mail both confirmed sent|candidate_msg={candidate_completion_message_id} it_msg={it_setup_email_message_id} recipients={candidate_recipients joined by ","}|{PAPERCLIP_TASK_ID}
+```
+
+Audit-log readers (heartbeat sweeps, dashboards, status checks) treat `case_completed` as proof of both deliveries. The row format is the contract.
+
+**Branch — `it_ok == false` (candidate mail sent, IT mail failed):**
+
+Do NOT write `case_completed`. Write `case_completion_partial` instead — heartbeat IT-setup-retry sweep (`email-heartbeat.md` STEP 5d) re-attempts IT mail and flips the row only after a successful retry:
+
+```
+{now}|{case_id}|{employee_email}|{employee_full_name}|{employee_type}|{human_in_loop_email}|{recruiter_or_hr_name}|completed|case_completion_partial|Onboarding closed for candidate but IT setup mail failed — heartbeat IT-retry sweep will re-attempt|candidate_msg={candidate_completion_message_id} it_msg=null|{PAPERCLIP_TASK_ID}
+```
+
+The candidate-facing closure stands (mail confirmed delivered). Only the IT-side leg is pending. Heartbeat sweep flips this case to `case_completed` (with both messageIds) once IT mail lands.
+
+Either way, write exactly ONE row in Step 5 per phase wake.
 
 ---
 
@@ -124,17 +150,27 @@ Row 5a — case completed:
 Append:
 ```json
 "close_case": {
-  "status": "complete",
+  "status": "complete | partial_it",
   "completed_at": "{ISO now}",
   "candidate_completion_email_sent": true,
+  "candidate_completion_retries": 0,
   "candidate_completion_recipients": ["{employee_email}", "{alternate_email if present}"],
   "candidate_completion_message_id": "{completion_email_message_id}",
   "it_setup_email_sent": true|false,
+  "it_setup_retries": 0,
   "it_setup_recipients": ["$IT_SUPPORT_EMAIL", "{human_in_loop_email}", "{recruiter_or_hr_email}"],
   "it_setup_message_id": "{it_setup_email_message_id or null}",
-  "final_status": "completed"
+  "parent_patch_succeeded": true|false,
+  "parent_patch_retries": 0,
+  "final_status": "completed | completion_partial"
 }
 ```
+
+Field meaning:
+- `status = "complete"` ⇔ both mails proven sent. Audit row written in Step 5 is `case_completed`.
+- `status = "partial_it"` ⇔ candidate mail proven sent, IT mail failed. Audit row is `case_completion_partial`. Heartbeat IT-retry sweep (`email-heartbeat.md` STEP 5d) reads `it_setup_email_sent == false` and re-attempts; on success it writes `case_completed` and flips both fields.
+- `candidate_completion_email_sent` always `true` here (Step 3 blocks the phase otherwise).
+- `candidate_completion_retries` / `it_setup_retries` are heartbeat-owned counters. Phase 10 writes them as `0` initially.
 
 Top-level:
 - Add `close_case` to `phases_complete[]`.

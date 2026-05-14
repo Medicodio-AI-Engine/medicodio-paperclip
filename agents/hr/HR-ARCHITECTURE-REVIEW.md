@@ -28,7 +28,7 @@
 
 ## 1. System Overview
 
-The HR agent is a **fully automated onboarding coordinator**. When Karthik (or any HR person) creates a Paperclip issue with employee details, the agent:
+The HR agent is a **fully automated onboarding coordinator**. When an HR person creates a Paperclip issue with employee details, the agent:
 
 1. Routes the trigger: if it's a fresh case, runs full setup; if it's a heartbeat resume, jumps directly to reply processing
 2. Creates a SharePoint folder for the employee
@@ -143,7 +143,7 @@ The HR agent has access to these MCP servers (defined in `mcp.json`):
 ## 4. How a Case Starts — Trigger Flow
 
 ```
-Karthik creates a Paperclip issue
+HR creates a Paperclip issue
          │
          ├── Label: "onboarding"
          ├── Title starts with "Onboard:"
@@ -942,6 +942,59 @@ PHASE 10: Close case
 | 6 | Audit-log performance as it grows | 🔲 Future | Heartbeat reads the full file every 30 min. When it grows large, consider archiving rows older than 90 days to `audit-log-archive-{YYYY}.md`. |
 | 7 | No pause/resume mechanism for a specific case | 🔲 Open | Required: a way to freeze a case (not cancel) and resume later. Possible approach: add `paused` as an exception status — heartbeat skips it, human sets it back to previous status to resume. |
 | 8 | `alternate_candidate_email` — heartbeat reply search | ✅ Partially resolved | Heartbeat Step 3b now flags replies from unrecognized senders (not `employee_email`) and notifies HR. Explicit `from:{alternate_candidate_email}` search in Step 3a is a remaining gap — heartbeat does not proactively search the alternate address in 3a, only catches it via subject-line fallback in 3b. |
+
+---
+
+## 18. Heartbeat Enumeration & Reply-Detection Guarantees
+
+This section documents the contract the heartbeat must uphold per tick. All guarantees here are mechanically enforced inside `routines/email-heartbeat.md` — agent prose alone is insufficient.
+
+### 18.1 Enumeration guarantee — every case visited every tick
+
+| Layer | Mechanism | File |
+|---|---|---|
+| Intent | `## NON-NEGOTIABLE` block at top of routine; explicit list of acceptable per-case audit events | `email-heartbeat.md` |
+| Anchor | `heartbeat_start` audit row written FIRST. Carries `case_ids: {comma-joined manifest}` | STEP 1 |
+| Invariant | Top-of-step rule: every case in the bucket emits ≥1 audit row this tick | STEP 2 + STEP 5 |
+| Gate | STEP 6.0 re-reads audit-log, diffs manifest vs processed, writes `heartbeat_enumeration_failed` and skips the clean summary row when any case is missing. Human + Teams notified | STEP 6 |
+
+An agent that silently skips a case fails the gate, escalates, and the next tick re-runs from a fresh manifest.
+
+### 18.2 Reply-detection guarantee — no hardcoded patterns
+
+| Layer | Mechanism | Source field |
+|---|---|---|
+| Thread key | `outlook_search_emails conversationId={...}` | `run_state.send_initial.conversation_id` (captured in Phase 2) |
+| Idempotency | Diff against `run_state.process_reply.processed_message_ids[]` (set semantics, append-only) | Phase 4 + heartbeat |
+| Sender check | Exact normalised equality to `employee_email` / `alternate_candidate_email` | run-state payload |
+| Belt-and-suspenders | Global inbox sweep (STEP 2.5) — no keyword filter, matched purely by conversationId set + sender-membership across active bucket | mailbox list from `HR-Onboarding/config.md` `MONITORED_MAILBOXES` |
+| Legacy fallback | Only when `conversation_id` is null: `from:{employee_email}` + subject text read from `run_state.send_initial.subject` (NOT hardcoded) | run-state |
+
+No candidate name, ticket id, or subject string is hardcoded inside `email-heartbeat.md` or `send-initial.md`. All identifiers are per-case from run-state.
+
+### 18.3 Delivery proof guarantee — `case_completed` ⇔ both mails sent
+
+| State | Audit event | Meaning |
+|---|---|---|
+| Both mails non-null messageId | `case_completed` | End-to-end delivery confirmed |
+| Candidate mail sent, IT mail failed | `case_completion_partial` | Candidate-side closure stands; IT-side awaits heartbeat retry sweep |
+| Candidate mail fails | Phase 10 blocks | Never writes `case_completed` |
+
+Heartbeat sweeps in STEP 5d (IT retry) and STEP 5d-bis (candidate completion retry) flip `partial → completed` only after a successful retry, writing the unified `case_completed` row with both messageIds.
+
+### 18.4 Catch-up + transient-failure resilience
+
+- Catch-up policy `bounded` (6h lookback). Idempotency via `processed_message_ids` makes replay safe.
+- Per-case `run_state.heartbeat.transient_failures` counter. Three consecutive failed ticks → escalation row + human notify. Case stays in bucket; next tick still attempts.
+- Path resolution layered: regex compute → run-state-stored path (authoritative) → case-tracker header fallback. Documented in STEP 5a.
+
+### 18.5 Parent linkage guarantee — orphan children prevented
+
+Before every sub-issue create, `GET /api/issues/{parent_issue_id}`. If parent is `done` / `cancelled` / 404, the create is refused, `orphan_child_prevented` audit row is written, and the human is notified. Sub-issue descriptions carry four linkage fields (`case_id`, `parent_issue_id`, `paperclip_issue_id`, `run_state_path`) — any one of them is sufficient to recover the tree.
+
+### 18.6 Paperclip-issue index as recovery source
+
+If a case's `case_created` audit row was never written (Phase 1 partial), STEP 1d queries Paperclip for `[HR-ONBOARD]` parent issues, resolves run-state via the layered path resolution, and admits the case to the appropriate bucket with a `case_recovered_from_paperclip_index` audit row. Audit-log is one of two indices, not the only one.
 
 ---
 

@@ -52,8 +52,11 @@ For each attachment, call `outlook_read_attachment`:
 | `.txt / .csv / .md` | ✅ | `text` |
 | `.jpg / .jpeg / .png / .gif / .webp` | ✅ | Image content block — Claude vision reads directly |
 | `.heic / .tiff` | ⚠️ | Flag for manual review — may not extract |
+| `.xlsx / .xls` | 🚫 (presence-only) | **HRMS Onboarding Form.** Do NOT extract or parse content. Do NOT open the file. Do NOT check whether fields are filled. Record `present: true` based on attachment presence alone. Field-fill review is delegated to the human approver at `complete-submission.md` Step 8/9. |
 | `.zip / .rar` | ❌ | Ask candidate to send files unzipped. BLOCK that attachment. |
 | Other binary | ❌ | Metadata only — flag for manual verification |
+
+**HRMS Excel hard rule:** for any `.xlsx` / `.xls` attachment (the HRMS Onboarding Form returned by the candidate), the ONLY check this skill performs is "did the candidate attach an Excel file." Never emit BLOCK or WARN flags about empty cells, missing fields, partial data, or content layout. Never call `outlook_read_attachment` to parse the workbook for validation. The human approver inspects field completeness manually after Phase 7+8 creates the approval. Skipping content parsing here is the correct behavior — do not "improve" it.
 
 **Retain `contentBytes` (base64) and `contentType` per attachment** — required by the calling routine for SharePoint upload. Do not discard after validation.
 
@@ -113,6 +116,15 @@ For each required item:
 - One attachment may satisfy multiple items (e.g., Aadhaar → Photo ID + Address Proof)
 - Attachments clearly unrelated to the checklist (company PRDs, meeting notes) do not count
 - For images: use visual content to identify document type even without a text label
+
+**HRMS Onboarding Form (Excel) — presence-only match:**
+
+The checklist item `HRMS Onboarding Form (Excel)` is satisfied by attachment presence alone:
+- If the candidate's reply (any round) carries any `.xlsx` or `.xls` attachment → `status = "present"`. Set `evidence = "Excel attachment received — content not parsed; human approver will verify fields"`. Do NOT mark `unclear`.
+- No Excel attached anywhere → `status = "pending"`.
+- Never assign `unclear` to this item. Never inspect the workbook to decide.
+
+Do not run any of the identity / consistency / expiry checks (Step 3b–3e) against an Excel file. Those checks apply to PDFs and images only. An `.xlsx` is invisible to Step 3b–3e by construction.
 
 ---
 
